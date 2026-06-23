@@ -3,8 +3,8 @@
 **/.venv/**
 
 # ---- Data ----
-data/
-**/data/**
+/data/final_transliteration_dataset_fixed_v2.csv
+**/final_transliteration_dataset_fixed_v2.csv/**
 
 # ---- Bytecode & Cache ----
 __pycache__/
