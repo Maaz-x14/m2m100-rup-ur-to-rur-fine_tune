@@ -18,6 +18,7 @@ from transformers import M2M100Tokenizer
 
 TOKENIZER_ID      = "Mavkif/m2m100_rup_tokenizer_both"
 SRC_LANG          = "ur"                  # Urdu script is the input side
+UR_LANG_TOKEN_ID  = 128095               # __ur__ token ID (prepended by tokenizer)
 TGT_LANG_TOKEN_ID = 128105               # __roman-ur__ token ID (forced BOS)
 MAX_SRC_LEN       = 128                  # max tokens for Urdu input
 MAX_TGT_LEN       = 128                  # max tokens for Roman Urdu output
@@ -75,17 +76,29 @@ def build_tokenize_fn(tokenizer, max_src_len: int, max_tgt_len: int):
     """
     Returns a batch-map function that tokenizes (urdu → roman_urdu) pairs.
 
-    Key details for M2M100:
-      • tokenizer.src_lang = "ur"         prepends __ur__ to source inputs
-      • tokenizer.src_lang = "roman-ur"   prepends __roman-ur__ to label inputs
-        (as_target_tokenizer() was removed in transformers>=5.0; the correct
-         replacement is to temporarily switch src_lang to the target language
-         code, then restore it — M2M100Tokenizer uses src_lang to pick the
-         language prefix token for both encoding directions)
+    WHY we don't use tokenizer.src_lang = "roman-ur":
+    ──────────────────────────────────────────────────
+    M2M100Tokenizer.src_lang setter calls set_src_lang_special_tokens(), which
+    does a lookup in self.lang_code_to_token. The token __roman-ur__ (id 128105)
+    was added as a raw custom token but was NOT registered in lang_code_to_token,
+    so setting src_lang = "roman-ur" raises KeyError: 'roman-ur'.
+
+    as_target_tokenizer() was also removed in transformers >= 5.x.
+
+    CORRECT APPROACH for label sequences:
+    ──────────────────────────────────────
+    1. Tokenize label strings normally with src_lang = "ur" — the tokenizer
+       prepends __ur__ (id 128095) as the first token.
+    2. Replace that first token id with __roman-ur__ (id 128105).
+
+    This is equivalent to what as_target_tokenizer() used to do: the only
+    difference between source and target encoding in M2M100 is which language
+    token sits at position 0. Everything else (SentencePiece subword splitting,
+    EOS, padding) is identical.
     """
     def tokenize_batch(batch):
         # ── Tokenize source (Urdu script) ──────────────────────────────────
-        tokenizer.src_lang = SRC_LANG  # "ur" → prepends __ur__ token
+        # src_lang = "ur" is already set on the tokenizer; leave it there.
         model_inputs = tokenizer(
             batch["urdu"],
             max_length=max_src_len,
@@ -94,26 +107,33 @@ def build_tokenize_fn(tokenizer, max_src_len: int, max_tgt_len: int):
         )
 
         # ── Tokenize target (Roman Urdu) ───────────────────────────────────
-        # Temporarily switch src_lang to "roman-ur" so the tokenizer prepends
-        # __roman-ur__ (id=128105) as the language prefix on the label sequence.
-        # This is the transformers>=5.x replacement for as_target_tokenizer().
-        tokenizer.src_lang = "roman-ur"
-        labels = tokenizer(
+        # Tokenize with src_lang still set to "ur" so the tokenizer prepends
+        # __ur__ (id 128095) at position 0.  We then overwrite position 0 with
+        # __roman-ur__ (id 128105) on every non-padding sequence.
+        #
+        # We must NOT change tokenizer.src_lang here — "roman-ur" is not in
+        # lang_code_to_token and would raise a KeyError.
+        label_encodings = tokenizer(
             batch["roman_urdu"],
             max_length=max_tgt_len,
             truncation=True,
             padding="max_length",
         )
-        # Restore src_lang for subsequent batches
-        tokenizer.src_lang = SRC_LANG
 
-        # Replace padding token ids in labels with -100 so CrossEntropyLoss
-        # ignores them — standard seq2seq practice
-        label_ids = labels["input_ids"]
-        label_ids = [
-            [(tok if tok != tokenizer.pad_token_id else -100) for tok in ids]
-            for ids in label_ids
-        ]
+        label_ids = []
+        for ids in label_encodings["input_ids"]:
+            ids = list(ids)  # make a mutable copy
+
+            # Replace the language prefix token at position 0.
+            # The tokenizer always puts a lang token first; swap __ur__ → __roman-ur__.
+            # Guard: only replace if position 0 is actually __ur__ (sanity check).
+            if ids[0] == UR_LANG_TOKEN_ID:
+                ids[0] = TGT_LANG_TOKEN_ID
+
+            # Replace padding token ids with -100 so CrossEntropyLoss ignores them.
+            ids = [tok if tok != tokenizer.pad_token_id else -100 for tok in ids]
+
+            label_ids.append(ids)
 
         model_inputs["labels"] = label_ids
         return model_inputs
@@ -150,11 +170,12 @@ def main():
     #    facebook/m2m100_418M tokenizer — it lacks __ur__ and __roman-ur__ tokens
     print(f"[prepare_data] Loading tokenizer from '{TOKENIZER_ID}' ...")
     tokenizer = M2M100Tokenizer.from_pretrained(TOKENIZER_ID)
+    tokenizer.src_lang = SRC_LANG  # set once; never changed during tokenization
 
     # Confirm the custom tokens are present
     ur_id     = tokenizer.convert_tokens_to_ids("__ur__")
     roman_id  = tokenizer.convert_tokens_to_ids("__roman-ur__")
-    assert ur_id    == 128095, f"__ur__ id mismatch: got {ur_id}"
+    assert ur_id    == UR_LANG_TOKEN_ID,  f"__ur__ id mismatch: got {ur_id}"
     assert roman_id == TGT_LANG_TOKEN_ID, f"__roman-ur__ id mismatch: got {roman_id}"
     print(f"[prepare_data] Token IDs confirmed → __ur__: {ur_id} | __roman-ur__: {roman_id}")
 
@@ -183,6 +204,13 @@ def main():
     print(f"  labels length    : {len(sample['labels'])}")
     non_pad_labels = [t for t in sample["labels"] if t != -100]
     print(f"  non-masked label tokens: {len(non_pad_labels)}")
+
+    # Verify the first non-masked label token is __roman-ur__ (128105)
+    first_real = next(t for t in sample["labels"] if t != -100)
+    assert first_real == TGT_LANG_TOKEN_ID, (
+        f"Label sequence should start with __roman-ur__ (128105), got {first_real}"
+    )
+    print(f"  first label token: {first_real} (__roman-ur__ ✓)")
 
 
 if __name__ == "__main__":
