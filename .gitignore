@@ -1,0 +1,32 @@
+# ---- Python Environment ----
+.venv/
+**/.venv/**
+
+# ---- Data ----
+data/
+**/data/**
+
+# ---- Bytecode & Cache ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ---- Logs & Outputs ----
+*.log
+*.out
+*.tmp
+
+# ---- IDE & OS Files ----
+.vscode/
+.idea/
+.DS_Store
+
+# ---- Environment Variables ----
+.env
+.env.*
+
+# ---- Build & Distribution ----
+build/
+dist/
+*.egg-info/
