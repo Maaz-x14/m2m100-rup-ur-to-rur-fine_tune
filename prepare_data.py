@@ -30,7 +30,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Prepare transliteration dataset")
     p.add_argument(
         "--csv",
-        default="final_transliteration_dataset_fixed_v2.csv",
+        default="data/final_transliteration_dataset_fixed_v2.csv",
         help="Path to the input CSV file"
     )
     p.add_argument(

@@ -1,12 +1,12 @@
-# Core
+# Core — tested against these minimums; newer versions are fine
 torch>=2.1.0
-transformers>=4.40.0
+transformers>=5.0.0        # >=5.x required: as_target_tokenizer() was removed in 5.0
 datasets>=2.18.0
 peft>=0.10.0
 sacrebleu>=2.3.1
-sentencepiece>=0.1.99   # required by M2M100Tokenizer
-accelerate>=0.27.0      # required by Trainer fp16 path
+sentencepiece>=0.1.99      # required by M2M100Tokenizer
+accelerate>=0.27.0         # required by Trainer fp16 path
 
 # Optional but recommended
-scipy>=1.11.0           # used internally by some HF eval utilities
+scipy>=1.11.0              # used internally by some HF eval utilities
 numpy>=1.24.0
