@@ -13,6 +13,13 @@ Hardware target: NVIDIA A5000 (24 GB VRAM)
   → per_device_train_batch_size = 16
   → gradient_accumulation_steps  = 4  (effective batch = 64)
   → base model is NOT quantised (full fp16 fine-tune via LoRA)
+
+Compatibility: transformers >= 5.0
+  • Seq2SeqTrainer: tokenizer= removed → processing_class=
+  • Seq2SeqTrainingArguments: warmup_ratio= removed → warmup_steps= (float < 1
+    is interpreted as ratio in 5.x)
+  • Seq2SeqTrainingArguments: logging_dir= removed → removed entirely; set the
+    TENSORBOARD_LOGGING_DIR environment variable if TensorBoard logging is needed
 """
 
 import os
@@ -81,7 +88,9 @@ def parse_args():
                    help="Gradient accumulation steps. Effective batch = batch_size × grad_accum.")
     p.add_argument("--learning_rate",     type=float, default=5e-4,
                    help="AdamW learning rate. LoRA adapters can use a higher LR than full FT.")
-    p.add_argument("--warmup_ratio",      type=float, default=0.06)
+    p.add_argument("--warmup_ratio",      type=float, default=0.06,
+                   help="Fraction of total steps used for LR warmup (passed as warmup_steps "
+                        "float to transformers 5.x, which accepts floats < 1 as a ratio).")
     p.add_argument("--label_smoothing",   type=float, default=0.1)
     p.add_argument("--early_stop_patience", type=int, default=3)
     p.add_argument("--max_new_tokens",    type=int,   default=128,
@@ -159,7 +168,7 @@ def main():
     # ── 1. Load tokenizer ─────────────────────────────────────────────────────
     print(f"[train] Loading tokenizer from '{TOKENIZER_ID}' ...")
     tokenizer = M2M100Tokenizer.from_pretrained(TOKENIZER_ID)
-    tokenizer.src_lang = SRC_LANG  # set globally; also set per-batch in collation
+    tokenizer.src_lang = SRC_LANG
 
     # ── 2. Load base model ────────────────────────────────────────────────────
     print(f"[train] Loading base model from '{MODEL_ID}' ...")
@@ -202,6 +211,14 @@ def main():
     # ── 6. Training arguments ─────────────────────────────────────────────────
     # Evaluation strategy: eval at every epoch end; best checkpoint kept by
     # eval_loss (lower = better) for early stopping.
+    #
+    # transformers 5.x API notes:
+    #   • warmup_ratio= was removed in 5.x; warmup_steps= now accepts a float
+    #     in [0, 1) and treats it as a ratio — functionally identical.
+    #   • logging_dir= was removed in 5.x; set the TENSORBOARD_LOGGING_DIR
+    #     environment variable instead if you need TensorBoard logs.
+    #   • tokenizer= was removed from Seq2SeqTrainer.__init__; the replacement
+    #     is processing_class= (see step 7 below).
     training_args = Seq2SeqTrainingArguments(
         output_dir=args.output_dir,
 
@@ -217,7 +234,9 @@ def main():
 
         # ── Optimiser ─────────────────────────────────────────────────────
         learning_rate=args.learning_rate,
-        warmup_ratio=args.warmup_ratio,
+        # warmup_steps accepts a float < 1 in transformers 5.x; treated as
+        # warmup ratio (replaces the removed warmup_ratio parameter).
+        warmup_steps=args.warmup_ratio,
         lr_scheduler_type="cosine",
         optim="adamw_torch",
 
@@ -238,7 +257,9 @@ def main():
         generation_config=None,         # we set forced_bos below via model config
 
         # ── Logging ───────────────────────────────────────────────────────
-        logging_dir=os.path.join(args.output_dir, "logs"),
+        # logging_dir= was removed in transformers 5.x.
+        # Set env var TENSORBOARD_LOGGING_DIR before running if you need it:
+        #   export TENSORBOARD_LOGGING_DIR=./checkpoints/logs
         logging_steps=20,
         report_to="none",               # disable W&B / TensorBoard by default
 
@@ -253,12 +274,15 @@ def main():
     model.config.forced_bos_token_id = TGT_LANG_TOKEN_ID
 
     # ── 7. Trainer ────────────────────────────────────────────────────────────
+    # transformers 5.x: `tokenizer=` was removed from Trainer.__init__.
+    # The replacement is `processing_class=`, which accepts a tokenizer,
+    # feature extractor, or processor. Functionally identical for our use case.
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,     # replaces tokenizer= (removed in 5.x)
         data_collator=data_collator,
         compute_metrics=build_compute_metrics(tokenizer),
         callbacks=[
