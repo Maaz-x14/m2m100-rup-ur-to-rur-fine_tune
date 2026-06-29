@@ -4,72 +4,37 @@ train.py
 Fine-tunes Mavkif/m2m100_rup_ur_to_rur with LoRA (via peft) using
 HuggingFace Seq2SeqTrainer.
 
-LoRA is applied to ALL attention projection layers across both the encoder
-and decoder (self-attention + cross-attention):
-    q_proj, k_proj, v_proj, out_proj
+LoRA applied to: q_proj, k_proj, v_proj, out_proj (encoder + decoder)
+Hardware target: NVIDIA A5000 (24 GB VRAM), fp16, batch=16, grad_accum=4
 
-Hardware target: NVIDIA A5000 (24 GB VRAM)
-  → fp16 mixed precision
-  → per_device_train_batch_size = 16
-  → gradient_accumulation_steps  = 4  (effective batch = 64)
-  → base model is NOT quantised (full fp16 fine-tune via LoRA)
-
-Compatibility: transformers >= 5.0 + peft >= 0.10
-  • Seq2SeqTrainer: tokenizer= → processing_class=
-  • TrainingArguments: warmup_ratio= → warmup_steps= (float<1 = ratio in 5.x)
-  • TrainingArguments: logging_dir= removed entirely
-
-WHY task_type IS NOT SET IN LoraConfig
----------------------------------------
-When task_type=TaskType.SEQ_2_SEQ_LM is given, get_peft_model() wraps the
-model in PeftModelForSeq2SeqLM. That class's forward() converts
-decoder_input_ids → decoder_inputs_embeds internally, then passes BOTH to
-M2M100ForConditionalGeneration. M2M100Decoder.forward() raises ValueError
-when it receives both simultaneously. This happens regardless of whether
-we strip decoder_inputs_embeds in a Trainer subclass, because PEFT re-injects
-it inside its own forward() AFTER our strip.
-
-Without task_type, get_peft_model() returns a generic PeftModel whose
-forward() is a pure pass-through with no decoder embedding conversion.
-LoRA adapters are injected identically in both cases — task_type only
-controls the wrapper class, not where adapters are applied.
-Generation still works because PeftModel delegates .generate() to the
-base model via __getattr__.
-
-M2M100 + TRANSFORMERS-5.X DECODER CONFLICT (fixed via PatchedM2M100Model)
----------------------------------------------------------------------------
-M2M100Model.forward() in transformers 5.x computes
-    decoder_inputs_embeds = self.shared(decoder_input_ids)
-and then passes BOTH decoder_input_ids AND decoder_inputs_embeds to
-M2M100Decoder, which raises:
-    ValueError: You cannot specify both decoder_input_ids and decoder_inputs_embeds
-
-This occurs in TWO call paths:
-  1. Training: Trainer calls model(**inputs) with labels → M2M100ForConditionalGeneration
-     runs shift_tokens_right → passes decoder_input_ids to M2M100Model → conflict.
-  2. Generation: .generate() internally sets decoder_input_ids → M2M100Model
-     computes embeds → passes both → same conflict.
-
-Fix: PatchedM2M100Model subclass overrides forward() to drop decoder_input_ids
-whenever decoder_inputs_embeds is already present. This is the single correct
-interception point that covers BOTH the training path and the .generate() path.
-
-The M2M100Seq2SeqTrainer subclass is still needed to pre-compute
-decoder_inputs_embeds from labels during training (so M2M100ForConditionalGeneration
-skips its own shift_tokens_right), but the actual conflict is now resolved
-inside PatchedM2M100Model regardless of call path.
-
-forced_bos_token_id (bug #5)
------------------------------
-In transformers 5.x, setting model.config.forced_bos_token_id raises:
-    ValueError: You have modified the pretrained model configuration...
-CORRECT: set model.generation_config.forced_bos_token_id instead,
-and clear model.config.forced_bos_token_id = None.
+Bugs fixed (do NOT reintroduce):
+  #1 prepare_data.py label tokenisation — see prepare_data.py
+  #2 Seq2SeqTrainer(tokenizer=...) → processing_class=
+  #2 warmup_ratio= → warmup_steps= (float<1 = ratio in transformers 5.x)
+  #2 logging_dir= removed; use TENSORBOARD_LOGGING_DIR env var
+  #3 M2M100 decoder conflict (training path) — M2M100Seq2SeqTrainer injects
+     decoder_inputs_embeds so shift_tokens_right is skipped
+  #3 M2M100 decoder conflict (generation path) — PatchedM2M100Model.forward()
+     drops decoder_input_ids when decoder_inputs_embeds already present
+  #4 task_type=TaskType.SEQ_2_SEQ_LM MUST NOT be set — PeftModelForSeq2SeqLM
+     re-injects decoder_input_ids after our strip, re-triggering the conflict
+  #5 model.config.forced_bos_token_id rejected in transformers 5.x —
+     use model.generation_config.forced_bos_token_id instead
+  #6 OOM during eval — beam search on 128k vocab with large batch causes spike:
+     eval_batch=32 * beams=4 * seq=128 * vocab=128112 * fp16 ≈ 4.2 GB logits
+     Fix: generation_num_beams=1 (greedy eval), eval_batch_size default → 8,
+     expandable_segments allocator, empty_cache after each prediction_step
+  #7 patch_model() memory leak — del model.model before assigning patched copy,
+     otherwise both live in VRAM simultaneously (488M params duplicated)
 """
 
 import os
 import argparse
 import numpy as np
+
+# ── MUST be set before torch initialises the CUDA allocator ──────────────────
+# Reduces fragmentation that causes the VRAM spike during eval generation.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 from datasets import load_from_disk
@@ -106,7 +71,7 @@ def parse_args():
     p.add_argument("--lora_dropout",         type=float, default=0.1)
     p.add_argument("--num_epochs",           type=int,   default=30)
     p.add_argument("--batch_size",           type=int,   default=16)
-    p.add_argument("--eval_batch_size",      type=int,   default=32)
+    p.add_argument("--eval_batch_size",      type=int,   default=8)   # bug #6: was 32
     p.add_argument("--grad_accum",           type=int,   default=4)
     p.add_argument("--learning_rate",        type=float, default=5e-4)
     p.add_argument("--warmup_ratio",         type=float, default=0.06)
@@ -119,7 +84,7 @@ def parse_args():
 # ── LoRA configuration ────────────────────────────────────────────────────────
 
 def build_lora_config(args) -> LoraConfig:
-    # task_type intentionally omitted — see module docstring for full explanation.
+    # task_type intentionally omitted — bug #4
     return LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
@@ -129,26 +94,17 @@ def build_lora_config(args) -> LoraConfig:
         inference_mode=False,
     )
 
-# ── Patched M2M100Model (fixes both training AND generation decoder conflict) ─
+# ── PatchedM2M100Model — fixes decoder conflict in generation path (bug #3) ──
 
 class PatchedM2M100Model(M2M100Model):
     """
-    Subclass of M2M100Model that fixes the transformers-5.x decoder conflict.
+    M2M100Model.forward() in transformers 5.x computes decoder_inputs_embeds
+    from decoder_input_ids, then passes BOTH to M2M100Decoder → ValueError.
 
-    Root cause: M2M100Model.forward() computes:
-        decoder_inputs_embeds = self.shared(decoder_input_ids)
-    then passes BOTH to M2M100Decoder, which raises ValueError.
-
-    Fix: if decoder_inputs_embeds is already provided, drop decoder_input_ids
-    before the decoder call. This covers both:
-      - Training path (decoder_inputs_embeds pre-computed by M2M100Seq2SeqTrainer)
-      - Generation path (.generate() sets decoder_input_ids; M2M100Model would
-        then compute embeds and pass both — we intercept before that happens)
+    Fix: drop decoder_input_ids when decoder_inputs_embeds already provided.
+    Covers the .generate() path which our Trainer override cannot intercept.
     """
-
     def forward(self, *args, **kwargs):
-        # If caller already supplied decoder_inputs_embeds, remove
-        # decoder_input_ids to prevent M2M100Decoder from seeing both.
         if kwargs.get("decoder_inputs_embeds") is not None:
             kwargs.pop("decoder_input_ids", None)
         return super().forward(*args, **kwargs)
@@ -156,51 +112,41 @@ class PatchedM2M100Model(M2M100Model):
 
 def patch_model(model: M2M100ForConditionalGeneration) -> M2M100ForConditionalGeneration:
     """
-    Replaces model.model (M2M100Model) with PatchedM2M100Model in-place.
-    Copies all weights and attributes; no reloading required.
+    Swaps model.model in-place with PatchedM2M100Model.
+    del before assign is critical — bug #7 (double VRAM usage without it).
     """
     original = model.model
-    patched = PatchedM2M100Model(model.config)
+    patched  = PatchedM2M100Model(model.config)
     patched.load_state_dict(original.state_dict())
     patched.to(next(original.parameters()).dtype)
     patched.to(next(original.parameters()).device)
-    del model.model   # free original BEFORE assigning patched
+    del model.model            # free original BEFORE assigning — bug #7
     model.model = patched
     torch.cuda.empty_cache()
     return model
 
-
-# ── Custom Trainer (pre-computes decoder_inputs_embeds for training path) ────
+# ── M2M100Seq2SeqTrainer — fixes decoder conflict in training path (bug #3) ──
 
 class M2M100Seq2SeqTrainer(Seq2SeqTrainer):
     """
-    Injects decoder_inputs_embeds before compute_loss / prediction_step so that
-    M2M100ForConditionalGeneration.forward() skips shift_tokens_right and never
-    passes decoder_input_ids into M2M100Model.
-
-    PatchedM2M100Model handles the .generate() path independently, so this
-    trainer is only responsible for the supervised training/eval-loss path.
+    Pre-computes decoder_inputs_embeds from labels before compute_loss /
+    prediction_step so M2M100ForConditionalGeneration skips shift_tokens_right
+    and never passes decoder_input_ids into M2M100Model.
     """
 
     @staticmethod
-    def _base(model: torch.nn.Module) -> torch.nn.Module:
+    def _base(model):
         return model.get_base_model() if hasattr(model, "get_base_model") else model
 
-    def _decoder_inputs_embeds(
-        self,
-        model: torch.nn.Module,
-        labels: torch.Tensor,
-    ) -> torch.Tensor:
+    def _decoder_inputs_embeds(self, model, labels):
         base     = self._base(model)
         pad_id   = base.config.pad_token_id
         start_id = base.config.decoder_start_token_id
 
-        clean = labels.masked_fill(labels == -100, pad_id)
-
+        clean          = labels.masked_fill(labels == -100, pad_id)
         shifted        = clean.new_zeros(clean.shape)
         shifted[:, 1:] = clean[:, :-1]
         shifted[:, 0]  = start_id
-
         return base.model.shared(shifted)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -222,11 +168,14 @@ class M2M100Seq2SeqTrainer(Seq2SeqTrainer):
                 inputs["decoder_inputs_embeds"] = self._decoder_inputs_embeds(
                     model, inputs["labels"]
                 )
-        return super().prediction_step(
+        result = super().prediction_step(
             model, inputs,
             prediction_loss_only=prediction_loss_only,
             ignore_keys=ignore_keys,
         )
+        # Free beam-search intermediates immediately — bug #6
+        torch.cuda.empty_cache()
+        return result
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
@@ -265,13 +214,11 @@ def main():
     )
     model.config.use_cache = False
 
-    # Bug #5: transformers 5.x rejects forced_bos_token_id on model.config.
-    # Must set on generation_config and clear on config.
+    # bug #5: transformers 5.x rejects forced_bos_token_id on model.config
     model.config.forced_bos_token_id = None
     model.generation_config.forced_bos_token_id = TGT_LANG_TOKEN_ID
 
-    # 3. Patch M2M100Model to fix decoder conflict in ALL call paths
-    #    (training + generation). Must be done BEFORE get_peft_model().
+    # 3. Patch M2M100Model — must be BEFORE get_peft_model()
     model = patch_model(model)
     print("[train] PatchedM2M100Model installed.")
 
@@ -288,7 +235,8 @@ def main():
     eval_ds  = dataset["validation"]
     print(f"[train] train: {len(train_ds)} | validation: {len(eval_ds)}")
 
-    # 6. Collator — model= omitted intentionally (see original docstring)
+    # 6. Collator — model= omitted: supplying it injects decoder_input_ids
+    #    into the batch, conflicting with M2M100's internal shift_tokens_right
     data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
         label_pad_token_id=-100,
@@ -305,7 +253,7 @@ def main():
         fp16=True,
         bf16=False,
         learning_rate=args.learning_rate,
-        warmup_steps=args.warmup_ratio,   # float<1 treated as ratio in transformers 5.x
+        warmup_steps=args.warmup_ratio,    # float<1 = ratio in transformers 5.x
         lr_scheduler_type="cosine",
         optim="adamw_torch",
         label_smoothing_factor=args.label_smoothing,
@@ -317,6 +265,7 @@ def main():
         save_total_limit=3,
         predict_with_generate=True,
         generation_max_length=args.max_new_tokens,
+        generation_num_beams=1,            # bug #6: greedy eval — 4x less VRAM than beam=4
         generation_config=None,
         logging_steps=20,
         report_to="none",
@@ -340,7 +289,7 @@ def main():
     print("[train] Starting training ...")
     trainer.train()
 
-    # 10. Save LoRA adapter weights only
+    # 10. Save LoRA adapter weights only (not frozen base model)
     os.makedirs(args.final_model_dir, exist_ok=True)
     model.save_pretrained(args.final_model_dir)
     tokenizer.save_pretrained(args.final_model_dir)
