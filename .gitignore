@@ -33,3 +33,5 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+m2m100_prompt_finetune

@@ -9,7 +9,7 @@ Fine-tunes [`Mavkif/m2m100_rup_ur_to_rur`](https://huggingface.co/Mavkif/m2m100_
 ```
 M2M100-FINETUNE/
 ├── data/
-│   └── final_transliteration_dataset.csv   # urdu + roman_urdu columns
+│   └── final_transliteration_dataset_fixed_v2.csv   # urdu + roman_urdu columns
 ├── prepare_data.py     # tokenise CSV → HF DatasetDict on disk
 ├── train.py            # LoRA fine-tuning with Seq2SeqTrainer
 ├── inference.py        # load adapter + run transliteration
@@ -27,7 +27,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-> **Python 3.10+ recommended.** The type hint `list[str]` in `inference.py` requires ≥3.9.
+> **Python 3.10+ required.** The type hint `list[str]` in `inference.py` requires ≥3.9; tested on 3.12.
 
 ---
 
@@ -37,18 +37,17 @@ pip install -r requirements.txt
 
 ```bash
 python prepare_data.py \
-    --csv data/final_transliteration_dataset.csv \
+    --csv data/final_transliteration_dataset_fixed_v2.csv \
     --output_dir ./processed_dataset
 ```
 
-This tokenises the CSV using `Mavkif/m2m100_rup_tokenizer_both`, performs a 95/5 train/validation split, and saves the result in HuggingFace Arrow format.
+Tokenises the CSV using `Mavkif/m2m100_rup_tokenizer_both`, performs a 95/5 train/validation split, and saves in HuggingFace Arrow format.
 
 Expected output:
 ```
-[prepare_data] Loaded 1922 rows from 'data/final_transliteration_dataset.csv'
-[prepare_data] Split → train: 1825 | validation: 97
 [prepare_data] Token IDs confirmed → __ur__: 128095 | __roman-ur__: 128105
 [prepare_data] Dataset saved to './processed_dataset'
+  first label token: 128105 (__roman-ur__ ✓)
 ```
 
 ### 2 — Fine-tune
@@ -60,33 +59,30 @@ python train.py \
     --final_model_dir ./fine_tuned_model
 ```
 
-Default hyperparameters target an **NVIDIA A5000 (24 GB)**. Adjust for your hardware:
+Default hyperparameters target an **NVIDIA A5000 (24 GB)**:
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--batch_size` | 16 | Per-device train batch size |
 | `--grad_accum` | 4 | Effective batch = `batch_size × grad_accum` = 64 |
 | `--learning_rate` | 5e-4 | Higher than full FT is fine for LoRA adapters |
-| `--lora_r` | 16 | LoRA rank — increase for more capacity |
-| `--lora_alpha` | 32 | Scaling = `alpha / r`; keep at `2 × r` |
+| `--lora_r` | 16 | LoRA rank |
+| `--lora_alpha` | 32 | Keep at `2 × lora_r` |
 | `--num_epochs` | 30 | Early stopping (patience 3) will usually fire first |
 
-For smaller GPUs (e.g. 8–12 GB), reduce `--batch_size 4 --grad_accum 16` to keep the effective batch the same.
+For smaller GPUs (e.g. 8–12 GB): `--batch_size 4 --grad_accum 16`.
 
-The best checkpoint (by `eval_loss`) is saved to `--final_model_dir`. Only the LoRA adapter weights are saved (a few MB), not the frozen base model.
+Only the LoRA adapter weights are saved to `--final_model_dir` (a few MB, not the frozen base model).
 
 ### 3 — Inference
 
 ```bash
-# Default demo sentences
 python inference.py --model_dir ./fine_tuned_model
 
-# Custom sentences
 python inference.py \
     --model_dir ./fine_tuned_model \
     --sentences "ڈاکٹر نے کہا" "کمپیوٹر بند ہے" "ورزش کرو"
 
-# From a text file (one sentence per line)
 python inference.py \
     --model_dir ./fine_tuned_model \
     --input_file urdu_sentences.txt
@@ -96,53 +92,47 @@ python inference.py \
 
 ## How LoRA is applied
 
-LoRA adapters are injected into all four attention projection layers across **both encoder and decoder** (self-attention and cross-attention):
+Adapters are injected into all four attention projection layers across **both encoder and decoder**:
 
 ```
 q_proj, k_proj, v_proj, out_proj
 ```
 
-`TaskType.SEQ_2_SEQ_LM` tells PEFT this is an encoder-decoder model, so it targets matching layers in both halves automatically. With default settings (`r=16`, `alpha=32`), trainable parameters are ~1.5–2 M out of ~418 M total — roughly 0.4%.
+`TaskType.SEQ_2_SEQ_LM` tells PEFT this is an encoder-decoder model. With defaults (`r=16`, `alpha=32`), ~4.7 M of 488 M parameters are trainable (~0.97%).
 
 ---
 
 ## Tokeniser notes
 
-Always use **`Mavkif/m2m100_rup_tokenizer_both`**, never `facebook/m2m100_418M`. The custom tokeniser adds two language tokens absent from the base vocabulary:
+Always use **`Mavkif/m2m100_rup_tokenizer_both`**, never `facebook/m2m100_418M`.
 
 | Token | ID |
 |---|---|
 | `__ur__` | 128095 |
 | `__roman-ur__` | 128105 |
 
-The scripts assert these IDs at startup (`prepare_data.py`) and hard-code `forced_bos_token_id=128105` at generation time so the decoder is steered to Roman Urdu output regardless of beam search.
-
-In `prepare_data.py`, labels are tokenised by temporarily switching `tokenizer.src_lang = "roman-ur"` (the ≥5.x replacement for the removed `as_target_tokenizer()` context manager).
+**Label tokenisation** (`prepare_data.py`): `"roman-ur"` is NOT a valid `src_lang` value (it is not in `lang_code_to_token`, causing `KeyError`), and `as_target_tokenizer()` was removed in transformers 5.x. The correct approach is to tokenise labels with `src_lang="ur"` (which prepends `__ur__`, id 128095 at position 0), then manually replace position 0 with `__roman-ur__` (id 128105). The sanity check at the end of `prepare_data.py` asserts this.
 
 ---
 
-## Known issue — sacrebleu reference format
+## Known compatibility issues and fixes
 
-The `compute_metrics` function in `train.py` constructs `references` as a list of single-element lists and then transposes with `zip(*references)`:
+### transformers 5.x API changes (all fixed in current code)
 
-```python
-references = [[l] for l in decoded_labels]
-bleu_score = sacrebleu.corpus_bleu(decoded_preds, list(zip(*references)))
+| Old (4.x) | New (5.x) | File |
+|---|---|---|
+| `Seq2SeqTrainer(tokenizer=...)` | `Seq2SeqTrainer(processing_class=...)` | `train.py` |
+| `warmup_ratio=0.06` | `warmup_steps=0.06` (float < 1 = ratio) | `train.py` |
+| `logging_dir=...` | Set `TENSORBOARD_LOGGING_DIR` env var | `train.py` |
+
+### M2M100 + transformers 5.x decoder conflict (fixed in current code)
+
+`M2M100Model.forward()` in transformers 5.x pre-computes `decoder_inputs_embeds` from `decoder_input_ids` via `self.shared()`, then passes **both** to `M2M100Decoder`, which raises:
+```
+ValueError: You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time
 ```
 
-For a single reference translation per example this works, but it's unnecessary transposition. A simpler and equally correct form is:
-
-```python
-bleu_score = sacrebleu.corpus_bleu(decoded_preds, [decoded_labels])
-```
-
-Both produce identical results; the current form is just harder to read.
-
----
-
-## Expanding the dataset
-
-The model currently trains on ~1,900 rows. To reduce hallucination on domain-specific words, add more rows to the CSV before running `prepare_data.py`. The `validate.py` script (if present) checks for forbidden characters, token-range violations, and duplicates before authoring new content.
+**Fix**: `M2M100Seq2SeqTrainer` (a thin subclass of `Seq2SeqTrainer` in `train.py`) overrides `compute_loss()` and `prediction_step()` to pop `decoder_inputs_embeds` from the batch before the forward call. No file patching or monkey-patching.
 
 ---
 
@@ -151,7 +141,7 @@ The model currently trains on ~1,900 rows. To reduce hallucination on domain-spe
 | Package | Minimum | Notes |
 |---|---|---|
 | `torch` | 2.1.0 | |
-| `transformers` | **5.0.0** | `as_target_tokenizer()` removed in 5.x |
+| `transformers` | 5.0.0 | |
 | `peft` | 0.10.0 | |
 | `datasets` | 2.18.0 | |
 | `sacrebleu` | 2.3.1 | |
