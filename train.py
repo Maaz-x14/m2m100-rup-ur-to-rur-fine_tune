@@ -35,6 +35,22 @@ LoRA adapters are injected identically in both cases — task_type only
 controls the wrapper class, not where adapters are applied.
 Generation still works because PeftModel delegates .generate() to the
 base model via __getattr__.
+
+M2M100 + TRANSFORMERS-5.X DECODER CONFLICT (fixed in M2M100Seq2SeqTrainer)
+---------------------------------------------------------------------------
+M2M100Model.forward() in transformers 5.x computes
+    decoder_inputs_embeds = self.shared(decoder_input_ids)
+and then passes BOTH decoder_input_ids AND decoder_inputs_embeds to
+M2M100Decoder, which raises:
+    ValueError: You cannot specify both decoder_input_ids and decoder_inputs_embeds
+
+Fix: M2M100Seq2SeqTrainer overrides compute_loss() and prediction_step() to
+pre-compute decoder_inputs_embeds from labels before calling model(**inputs).
+M2M100ForConditionalGeneration.forward() short-circuits the shift_tokens_right
+step when decoder_inputs_embeds is already present (it checks
+`decoder_inputs_embeds is None`), so M2M100Model receives only
+decoder_inputs_embeds — decoder_input_ids is never passed — and M2M100Decoder
+sees no conflict. Loss is computed correctly because `labels` remains in inputs.
 """
 
 import os
@@ -97,6 +113,106 @@ def build_lora_config(args) -> LoraConfig:
         target_modules=LORA_TARGET_MODULES,
         inference_mode=False,
     )
+
+# ── Custom Trainer (fixes transformers-5.x M2M100 decoder conflict) ──────────
+
+class M2M100Seq2SeqTrainer(Seq2SeqTrainer):
+    """
+    Thin Seq2SeqTrainer subclass that works around a transformers-5.x regression
+    in M2M100Model.forward().
+
+    Root cause
+    ----------
+    When Trainer calls model(**inputs) with `labels` but no explicit
+    `decoder_input_ids`, M2M100ForConditionalGeneration.forward() runs:
+        decoder_input_ids = shift_tokens_right(labels, ...)
+    then delegates to M2M100Model.forward(), which:
+      1. Embeds the ids: decoder_inputs_embeds = self.shared(decoder_input_ids)
+      2. Passes BOTH decoder_input_ids AND decoder_inputs_embeds to M2M100Decoder
+    M2M100Decoder raises:
+        ValueError: You cannot specify both decoder_input_ids and decoder_inputs_embeds
+    at the very first training step.
+
+    Fix
+    ---
+    Pre-compute decoder_inputs_embeds in compute_loss() / prediction_step() before
+    calling model(**inputs).  M2M100ForConditionalGeneration.forward() checks:
+        if labels is not None
+            and decoder_input_ids is None
+            and decoder_inputs_embeds is None:   ← False when we supply embeds
+                decoder_input_ids = shift_tokens_right(...)
+    So when decoder_inputs_embeds is already present:
+      • shift_tokens_right is skipped → decoder_input_ids stays None
+      • M2M100Model.forward() receives decoder_inputs_embeds only → no conflict
+      • Loss is computed correctly because `labels` stays in inputs
+    """
+
+    @staticmethod
+    def _base(model: torch.nn.Module) -> torch.nn.Module:
+        """Unwrap PeftModel to reach the underlying M2M100ForConditionalGeneration."""
+        return model.get_base_model() if hasattr(model, "get_base_model") else model
+
+    def _decoder_inputs_embeds(
+        self,
+        model: torch.nn.Module,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Converts labels to decoder_inputs_embeds:
+            labels → (replace -100 with pad) → shift-right → embedding lookup
+
+        This mirrors the sequence M2M100ForConditionalGeneration would normally
+        apply internally:
+            shift_tokens_right(labels, pad_token_id, decoder_start_token_id)
+            → self.model.shared(decoder_input_ids)
+
+        We do it here so the model only receives decoder_inputs_embeds and
+        never receives decoder_input_ids.
+        """
+        base     = self._base(model)
+        pad_id   = base.config.pad_token_id
+        start_id = base.config.decoder_start_token_id
+
+        # -100 is a masking sentinel, not a real vocab id — replace before shifting
+        clean = labels.masked_fill(labels == -100, pad_id)
+
+        # Shift right: decoder sees [BOS/start, tok_0, tok_1, ..., tok_{n-2}]
+        shifted        = clean.new_zeros(clean.shape)
+        shifted[:, 1:] = clean[:, :-1]
+        shifted[:, 0]  = start_id
+
+        # Embedding lookup via the model's shared embedding table
+        # Returns (batch, seq_len, d_model) in the model's dtype (fp16)
+        return base.model.shared(shifted)
+
+    # ── training step ─────────────────────────────────────────────────────────
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        inputs = dict(inputs)   # shallow copy — never mutate the DataLoader batch
+        if "labels" in inputs and "decoder_inputs_embeds" not in inputs:
+            inputs["decoder_inputs_embeds"] = self._decoder_inputs_embeds(
+                model, inputs["labels"]
+            )
+        return super().compute_loss(
+            model, inputs,
+            return_outputs=return_outputs,
+            num_items_in_batch=num_items_in_batch,
+        )
+
+    # ── evaluation / prediction step ──────────────────────────────────────────
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        inputs = dict(inputs)   # shallow copy
+        if "labels" in inputs and "decoder_inputs_embeds" not in inputs:
+            with torch.no_grad():   # eval only — no gradients needed here
+                inputs["decoder_inputs_embeds"] = self._decoder_inputs_embeds(
+                    model, inputs["labels"]
+                )
+        return super().prediction_step(
+            model, inputs,
+            prediction_loss_only=prediction_loss_only,
+            ignore_keys=ignore_keys,
+        )
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
@@ -192,8 +308,9 @@ def main():
         seed=42,
     )
 
-    # 7. Trainer
-    trainer = Seq2SeqTrainer(
+    # 7. Trainer — M2M100Seq2SeqTrainer fixes the transformers-5.x decoder conflict
+    #    (see class docstring above for full explanation)
+    trainer = M2M100Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
