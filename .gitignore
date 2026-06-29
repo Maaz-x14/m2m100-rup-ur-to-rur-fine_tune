@@ -35,3 +35,4 @@ dist/
 *.egg-info/
 
 m2m100_prompt_finetune
+m2m_prompt_M2M100_Seq2Seq_prompt

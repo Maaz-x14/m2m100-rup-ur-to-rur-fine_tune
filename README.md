@@ -9,7 +9,7 @@ Fine-tunes [`Mavkif/m2m100_rup_ur_to_rur`](https://huggingface.co/Mavkif/m2m100_
 ```
 M2M100-FINETUNE/
 ├── data/
-│   └── final_transliteration_dataset_fixed_v2.csv   # urdu + roman_urdu columns
+│   └── final_transliteration_dataset.csv   # urdu + roman_urdu columns
 ├── prepare_data.py     # tokenise CSV → HF DatasetDict on disk
 ├── train.py            # LoRA fine-tuning with Seq2SeqTrainer
 ├── inference.py        # load adapter + run transliteration
@@ -37,7 +37,7 @@ pip install -r requirements.txt
 
 ```bash
 python prepare_data.py \
-    --csv data/final_transliteration_dataset_fixed_v2.csv \
+    --csv data/final_transliteration_dataset.csv \
     --output_dir ./processed_dataset
 ```
 
