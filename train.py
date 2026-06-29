@@ -23,6 +23,75 @@ Compatibility: transformers >= 5.0
 """
 
 import os
+import sys
+import pathlib
+import importlib
+import importlib.util
+
+# ── GPU selection ────────────────────────────────────────────────────────────
+# Pin to GPU 0 (fully free, 23 GB). DataParallel + PEFT SEQ_2_SEQ_LM triggers
+# the "decoder_input_ids and decoder_inputs_embeds simultaneously" crash.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+
+# ── Patch M2M100Decoder.forward (must run before transformers is imported) ─────
+
+def _patch_m2m100_decoder():
+    """
+    transformers 5.x bug: M2M100Model.forward pre-computes decoder_inputs_embeds
+    from decoder_input_ids via self.shared(...), then passes BOTH to self.decoder().
+    M2M100Decoder.forward raises ValueError when it receives both simultaneously.
+
+    Correct fix: in the conflict branch, set input_ids = None (not inputs_embeds).
+    The subsequent elif inputs_embeds is not None: branch then runs correctly,
+    setting input_shape from the embeddings and proceeding without calling
+    embed_tokens (which would fail because input_ids is now None).
+
+    Previous incorrect attempt set inputs_embeds = None, which skipped the elif
+    and then called embed_tokens(input_ids) with a potentially-None input_ids.
+
+    Also reverts any previous bad patch automatically.
+    """
+    spec = importlib.util.find_spec("transformers")
+    if not spec or not spec.origin:
+        print("[patch] Cannot locate transformers — skipped.")
+        return
+    m2m_file = (pathlib.Path(spec.origin).parent /
+                "models" / "m2m_100" / "modeling_m2m_100.py")
+    if not m2m_file.exists():
+        print(f"[patch] {m2m_file} not found — skipped.")
+        return
+
+    src = m2m_file.read_text(encoding="utf-8")
+
+    # ── Revert any old incorrect patch ────────────────────────────────────────
+    old_bad = ('        inputs_embeds = None  '
+               '# PATCHED: prefer input_ids when both provided (PEFT+transformers5.x bug)')
+    raise_line = ('        raise ValueError("You cannot specify both decoder_input_ids'
+                  ' and decoder_inputs_embeds at the same time")')
+    if old_bad in src:
+        src = src.replace(old_bad, raise_line, 1)
+        print("[patch] Reverted old incorrect patch first.")
+
+    # ── Apply the correct patch ────────────────────────────────────────────────
+    correct_fix = ('        input_ids = None  '
+                   '# PATCHED: prefer pre-computed inputs_embeds (transformers5.x M2M100Model bug)')
+    correct_tag = 'PATCHED: prefer pre-computed inputs_embeds'
+
+    if correct_tag in src:
+        print("[patch] Already correctly patched.")
+        return
+    if raise_line not in src:
+        print("[patch] WARNING: expected line not found — patch skipped.")
+        return
+
+    src = src.replace(raise_line, correct_fix, 1)
+    m2m_file.write_text(src, encoding="utf-8")
+    importlib.invalidate_caches()
+    print(f"[patch] Correctly patched M2M100Decoder.forward in {m2m_file.name}")
+
+_patch_m2m100_decoder()
+
+# ── Imports ──────────────────────────────────────────────────────────────────────
 import argparse
 import numpy as np
 
@@ -36,7 +105,7 @@ from transformers import (
     DataCollatorForSeq2Seq,
     EarlyStoppingCallback,
 )
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, get_peft_model
 import sacrebleu
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -101,14 +170,29 @@ def parse_args():
 
 def build_lora_config(args) -> LoraConfig:
     """
-    Configures LoRA for M2M100ForConditionalGeneration (encoder-decoder).
+    LoRA config for M2M100 — task_type intentionally omitted.
 
-    TaskType.SEQ_2_SEQ_LM tells PEFT this is an encoder-decoder model,
-    so it injects adapters into both encoder and decoder modules that
-    match the target_modules names.
+    WHY task_type is NOT set
+    ────────────────────────
+    When task_type=TaskType.SEQ_2_SEQ_LM is given, get_peft_model() wraps
+    the model in PeftModelForSeq2SeqLM.  That class's forward() contains
+    prompt-learning code that converts decoder_input_ids → decoder_inputs_embeds
+    even for plain LoRA, then passes BOTH to M2M100ForConditionalGeneration.
+    M2M100Decoder.forward() explicitly rejects receiving both simultaneously
+    (raises ValueError / causes TypeError).
+
+    Without task_type, get_peft_model() returns a generic PeftModel whose
+    forward() is a simple pass-through:
+        return self.base_model(*args, **kwargs)
+    No decoder-embedding conversion, no conflict.
+
+    LoRA adapters are applied identically in both cases — task_type only
+    controls the wrapper class, not where the low-rank matrices are injected.
+    Generation (predict_with_generate=True) still works because PeftModel
+    delegates unknown attributes (including .generate) to the base model.
     """
     return LoraConfig(
-        task_type=TaskType.SEQ_2_SEQ_LM,
+        # task_type deliberately omitted — see docstring above
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
@@ -177,6 +261,10 @@ def main():
         torch_dtype=torch.float16,  # load weights in fp16 to save VRAM
     )
 
+    # Disable KV-cache: incompatible with LoRA gradient flow during training.
+    # Must be set BEFORE get_peft_model wraps the model.
+    model.config.use_cache = False
+
     # ── 3. Apply LoRA ─────────────────────────────────────────────────────────
     lora_config = build_lora_config(args)
     model = get_peft_model(model, lora_config)
@@ -200,10 +288,17 @@ def main():
 
     # ── 5. Data collator ──────────────────────────────────────────────────────
     # DataCollatorForSeq2Seq pads batches to the longest sequence in the batch
-    # (more efficient than padding to max_length globally in prepare_data.py)
+    # (more efficient than padding to max_length globally in prepare_data.py).
+    #
+    # NOTE: model= is intentionally omitted.  When model= is supplied the
+    # collator calls model.prepare_decoder_input_ids_from_labels() and injects
+    # decoder_input_ids into every batch.  PEFT >= 0.12 then converts those
+    # ids to decoder_inputs_embeds internally (SEQ_2_SEQ_LM prompt paths)
+    # and passes BOTH to M2M100ForConditionalGeneration, which crashes.
+    # Without model=, M2M100 creates decoder_input_ids from labels via
+    # shift_tokens_right() internally, bypassing the PEFT conflict entirely.
     data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
-        model=model,
         label_pad_token_id=-100,
         pad_to_multiple_of=8,    # keeps tensor shapes aligned for fp16 ops
     )
