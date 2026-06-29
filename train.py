@@ -18,11 +18,23 @@ Compatibility: transformers >= 5.0 + peft >= 0.10
   • Seq2SeqTrainer: tokenizer= → processing_class=
   • TrainingArguments: warmup_ratio= → warmup_steps= (float<1 = ratio in 5.x)
   • TrainingArguments: logging_dir= removed entirely
-  • M2M100 + transformers 5.x bug: M2M100Model.forward() passes BOTH
-    decoder_input_ids AND decoder_inputs_embeds to M2M100Decoder, which
-    raises ValueError. Fix: M2M100Seq2SeqTrainer.compute_loss() strips
-    decoder_inputs_embeds from the batch before the forward call.
-    No file patching, no monkey-patching — pure Python subclass.
+
+WHY task_type IS NOT SET IN LoraConfig
+---------------------------------------
+When task_type=TaskType.SEQ_2_SEQ_LM is given, get_peft_model() wraps the
+model in PeftModelForSeq2SeqLM. That class's forward() converts
+decoder_input_ids → decoder_inputs_embeds internally, then passes BOTH to
+M2M100ForConditionalGeneration. M2M100Decoder.forward() raises ValueError
+when it receives both simultaneously. This happens regardless of whether
+we strip decoder_inputs_embeds in a Trainer subclass, because PEFT re-injects
+it inside its own forward() AFTER our strip.
+
+Without task_type, get_peft_model() returns a generic PeftModel whose
+forward() is a pure pass-through with no decoder embedding conversion.
+LoRA adapters are injected identically in both cases — task_type only
+controls the wrapper class, not where adapters are applied.
+Generation still works because PeftModel delegates .generate() to the
+base model via __getattr__.
 """
 
 import os
@@ -39,7 +51,7 @@ from transformers import (
     DataCollatorForSeq2Seq,
     EarlyStoppingCallback,
 )
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, get_peft_model
 import sacrebleu
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -51,82 +63,33 @@ SRC_LANG          = "ur"
 
 LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "out_proj"]
 
-# ── Fix: custom Trainer that strips the conflicting key ──────────────────────
-
-class M2M100Seq2SeqTrainer(Seq2SeqTrainer):
-    """
-    Thin Seq2SeqTrainer subclass that works around a transformers 5.x bug
-    in M2M100Model.forward().
-
-    THE BUG
-    -------
-    In transformers 5.x, M2M100Model.forward() (modeling_m2m_100.py ~L780)
-    pre-computes decoder_inputs_embeds from decoder_input_ids via
-    self.shared(), then passes BOTH fields to M2M100Decoder.forward().
-    M2M100Decoder.forward() explicitly raises:
-        ValueError: You cannot specify both decoder_input_ids and
-                    decoder_inputs_embeds at the same time
-    This happens on the very first training step.
-
-    THE FIX
-    -------
-    Override compute_loss() to remove decoder_inputs_embeds from the batch
-    dict before calling model(**inputs). M2M100ForConditionalGeneration then
-    calls M2M100Model with only decoder_input_ids, and M2M100Model computes
-    the embeddings internally without conflict.
-
-    This is purely a data-flow fix — no file patching, no monkey-patching,
-    no changes to installed packages. Works regardless of PEFT version.
-    """
-
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        # Strip the conflicting key injected by transformers 5.x collation.
-        inputs.pop("decoder_inputs_embeds", None)
-        return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
-
-    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
-        # Also strip during eval / generate steps to be safe.
-        inputs.pop("decoder_inputs_embeds", None)
-        return super().prediction_step(
-            model, inputs,
-            prediction_loss_only=prediction_loss_only,
-            ignore_keys=ignore_keys,
-        )
-
 # ── CLI args ──────────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser(description="LoRA fine-tune M2M100 transliteration model")
-    p.add_argument("--dataset_dir",    default="./processed_dataset")
-    p.add_argument("--output_dir",     default="./checkpoints")
-    p.add_argument("--final_model_dir",default="./fine_tuned_model")
-    # LoRA
-    p.add_argument("--lora_r",       type=int,   default=16)
-    p.add_argument("--lora_alpha",   type=int,   default=32)
-    p.add_argument("--lora_dropout", type=float, default=0.1)
-    # Training
-    p.add_argument("--num_epochs",          type=int,   default=30)
-    p.add_argument("--batch_size",          type=int,   default=16)
-    p.add_argument("--eval_batch_size",     type=int,   default=32)
-    p.add_argument("--grad_accum",          type=int,   default=4)
-    p.add_argument("--learning_rate",       type=float, default=5e-4)
-    p.add_argument("--warmup_ratio",        type=float, default=0.06)
-    p.add_argument("--label_smoothing",     type=float, default=0.1)
-    p.add_argument("--early_stop_patience", type=int,   default=3)
-    p.add_argument("--max_new_tokens",      type=int,   default=128)
+    p.add_argument("--dataset_dir",     default="./processed_dataset")
+    p.add_argument("--output_dir",      default="./checkpoints")
+    p.add_argument("--final_model_dir", default="./fine_tuned_model")
+    p.add_argument("--lora_r",               type=int,   default=16)
+    p.add_argument("--lora_alpha",           type=int,   default=32)
+    p.add_argument("--lora_dropout",         type=float, default=0.1)
+    p.add_argument("--num_epochs",           type=int,   default=30)
+    p.add_argument("--batch_size",           type=int,   default=16)
+    p.add_argument("--eval_batch_size",      type=int,   default=32)
+    p.add_argument("--grad_accum",           type=int,   default=4)
+    p.add_argument("--learning_rate",        type=float, default=5e-4)
+    p.add_argument("--warmup_ratio",         type=float, default=0.06)
+    p.add_argument("--label_smoothing",      type=float, default=0.1)
+    p.add_argument("--early_stop_patience",  type=int,   default=3)
+    p.add_argument("--max_new_tokens",       type=int,   default=128)
+    p.add_argument("--dataloader_workers",   type=int,   default=2)
     return p.parse_args()
 
 # ── LoRA configuration ────────────────────────────────────────────────────────
 
 def build_lora_config(args) -> LoraConfig:
-    """
-    TaskType.SEQ_2_SEQ_LM is correct for encoder-decoder.
-    It tells PEFT to inject adapters into both encoder and decoder modules.
-    The decoder_inputs_embeds conflict is fixed in M2M100Seq2SeqTrainer above,
-    not by removing task_type (which would silently break generation).
-    """
+    # task_type intentionally omitted — see module docstring for full explanation.
     return LoraConfig(
-        task_type=TaskType.SEQ_2_SEQ_LM,
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
@@ -170,32 +133,30 @@ def main():
         MODEL_ID,
         torch_dtype=torch.float16,
     )
-    # Disable KV-cache: required for gradient flow through LoRA during training.
+    # Required for gradient flow through LoRA during training
     model.config.use_cache = False
+    # Force decoder to start with __roman-ur__ at generation time
+    model.config.forced_bos_token_id = TGT_LANG_TOKEN_ID
 
-    # 3. Apply LoRA
+    # 3. Apply LoRA (generic PeftModel — no task_type, no decoder embedding conflict)
     model = get_peft_model(model, build_lora_config(args))
     model.print_trainable_parameters()
     assert sum(p.numel() for p in model.parameters() if p.requires_grad) > 0, \
         "No trainable params — check LORA_TARGET_MODULES names."
 
-    # Force decoder BOS to __roman-ur__ for both training eval and inference.
-    model.config.forced_bos_token_id = TGT_LANG_TOKEN_ID
-
     # 4. Dataset
     print(f"[train] Loading dataset from '{args.dataset_dir}' ...")
-    dataset     = load_from_disk(args.dataset_dir)
-    train_ds    = dataset["train"]
-    eval_ds     = dataset["validation"]
+    dataset  = load_from_disk(args.dataset_dir)
+    train_ds = dataset["train"]
+    eval_ds  = dataset["validation"]
     print(f"[train] train: {len(train_ds)} | validation: {len(eval_ds)}")
 
     # 5. Collator
-    # model= intentionally omitted: passing model= causes the collator to call
-    # model.prepare_decoder_input_ids_from_labels(), injecting decoder_input_ids
-    # into the batch. Combined with transformers 5.x also computing
-    # decoder_inputs_embeds inside M2M100Model.forward(), this creates the
-    # dual-key conflict. Without model=, M2M100ForConditionalGeneration shifts
-    # labels internally via shift_tokens_right(), which is the correct path.
+    # model= omitted intentionally: supplying model= calls
+    # prepare_decoder_input_ids_from_labels() which injects decoder_input_ids
+    # into the batch. M2M100ForConditionalGeneration already does this
+    # internally via shift_tokens_right(), so passing it from the collator
+    # creates a duplicate that causes errors.
     data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
         label_pad_token_id=-100,
@@ -212,9 +173,7 @@ def main():
         fp16=True,
         bf16=False,
         learning_rate=args.learning_rate,
-        # warmup_steps accepts float < 1 as ratio in transformers 5.x
-        # (replaces the removed warmup_ratio parameter)
-        warmup_steps=args.warmup_ratio,
+        warmup_steps=args.warmup_ratio,   # float<1 treated as ratio in transformers 5.x
         lr_scheduler_type="cosine",
         optim="adamw_torch",
         label_smoothing_factor=args.label_smoothing,
@@ -229,12 +188,12 @@ def main():
         generation_config=None,
         logging_steps=20,
         report_to="none",
-        dataloader_num_workers=4,
+        dataloader_num_workers=args.dataloader_workers,
         seed=42,
     )
 
-    # 7. Trainer — use the subclass that strips decoder_inputs_embeds
-    trainer = M2M100Seq2SeqTrainer(
+    # 7. Trainer
+    trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
@@ -249,7 +208,7 @@ def main():
     print("[train] Starting training ...")
     trainer.train()
 
-    # 9. Save LoRA adapter weights only (not frozen base model)
+    # 9. Save LoRA adapter weights only (not the frozen base model)
     os.makedirs(args.final_model_dir, exist_ok=True)
     model.save_pretrained(args.final_model_dir)
     tokenizer.save_pretrained(args.final_model_dir)
