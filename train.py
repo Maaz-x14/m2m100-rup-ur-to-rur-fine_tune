@@ -252,7 +252,8 @@ def main():
     # Required for gradient flow through LoRA during training
     model.config.use_cache = False
     # Force decoder to start with __roman-ur__ at generation time
-    model.config.forced_bos_token_id = TGT_LANG_TOKEN_ID
+    model.generation_config.forced_bos_token_id = TGT_LANG_TOKEN_ID
+    model.config.forced_bos_token_id = None  # clear the deprecated one explicitly
 
     # 3. Apply LoRA (generic PeftModel — no task_type, no decoder embedding conflict)
     model = get_peft_model(model, build_lora_config(args))
