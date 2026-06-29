@@ -31,6 +31,8 @@ Bugs fixed (do NOT reintroduce):
 import os
 import argparse
 import numpy as np
+from transformers import GenerationConfig   # add to imports at top
+
 
 # ── MUST be set before torch initialises the CUDA allocator ──────────────────
 # Reduces fragmentation that causes the VRAM spike during eval generation.
@@ -243,6 +245,12 @@ def main():
         pad_to_multiple_of=8,
     )
 
+    gen_config = GenerationConfig(
+        forced_bos_token_id=TGT_LANG_TOKEN_ID,
+        max_new_tokens=args.max_new_tokens,
+        num_beams=1,
+    )
+
     # 7. Training arguments
     training_args = Seq2SeqTrainingArguments(
         output_dir=args.output_dir,
@@ -264,9 +272,9 @@ def main():
         greater_is_better=False,
         save_total_limit=3,
         predict_with_generate=True,
-        generation_max_length=args.max_new_tokens,
+        generation_max_length=args.max_new_tokens,  # keep this too
         generation_num_beams=1,            # bug #6: greedy eval — 4x less VRAM than beam=4
-        generation_config=None,
+        generation_config=gen_config,   # was: generation_config=None
         logging_steps=20,
         report_to="none",
         dataloader_num_workers=args.dataloader_workers,
