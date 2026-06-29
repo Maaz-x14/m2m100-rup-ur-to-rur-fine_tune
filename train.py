@@ -10,29 +10,36 @@ Hardware target: NVIDIA A5000 (24 GB VRAM), fp16, batch=16, grad_accum=4
 Bugs fixed (do NOT reintroduce):
   #1 prepare_data.py label tokenisation — see prepare_data.py
   #2 Seq2SeqTrainer(tokenizer=...) → processing_class=
-  #2 warmup_ratio= → warmup_steps= (float<1 = ratio in transformers 5.x)
+  #2 warmup_steps= must be an INTEGER computed from ratio × total_steps;
+       passing a raw float (e.g. 0.06) is silently truncated to 0 — zero warmup
   #2 logging_dir= removed; use TENSORBOARD_LOGGING_DIR env var
   #3 M2M100 decoder conflict (training path) — M2M100Seq2SeqTrainer injects
-     decoder_inputs_embeds so shift_tokens_right is skipped
+       decoder_inputs_embeds so shift_tokens_right is skipped
   #3 M2M100 decoder conflict (generation path) — PatchedM2M100Model.forward()
-     drops decoder_input_ids when decoder_inputs_embeds already present
+       drops decoder_input_ids when decoder_inputs_embeds already present
   #4 task_type=TaskType.SEQ_2_SEQ_LM MUST NOT be set — PeftModelForSeq2SeqLM
-     re-injects decoder_input_ids after our strip, re-triggering the conflict
+       re-injects decoder_input_ids after our strip, re-triggering the conflict
   #5 model.config.forced_bos_token_id rejected in transformers 5.x —
-     use model.generation_config.forced_bos_token_id instead
+       use model.generation_config.forced_bos_token_id instead
+  #5 Trainer syncs generation_config from tokenizer AFTER model setup, wiping
+       forced_bos_token_id — fixed by re-enforcing in prediction_step()
   #6 OOM during eval — beam search on 128k vocab with large batch causes spike:
-     eval_batch=32 * beams=4 * seq=128 * vocab=128112 * fp16 ≈ 4.2 GB logits
-     Fix: generation_num_beams=1 (greedy eval), eval_batch_size default → 8,
-     expandable_segments allocator, empty_cache after each prediction_step
+       eval_batch=32 * beams=4 * seq=128 * vocab=128112 * fp16 ≈ 4.2 GB logits
+       Fix: generation_num_beams=1 (greedy eval), eval_batch_size default → 8,
+       expandable_segments allocator, empty_cache after each prediction_step
   #7 patch_model() memory leak — del model.model before assigning patched copy,
-     otherwise both live in VRAM simultaneously (488M params duplicated)
+       otherwise both live in VRAM simultaneously (488M params duplicated)
+  #8 compute_metrics referenced tokenizer as a global (NameError at eval time);
+       build_compute_metrics(tokenizer) closure factory restores correct scoping
+  #9 generation_max_length in TrainingArguments conflicts with max_new_tokens in
+       GenerationConfig (different semantics: absolute vs relative position);
+       removed generation_max_length — GenerationConfig.max_new_tokens is canonical
 """
 
 import os
 import argparse
 import numpy as np
-from transformers import GenerationConfig   # add to imports at top
-
+from transformers import GenerationConfig
 
 # ── MUST be set before torch initialises the CUDA allocator ──────────────────
 # Reduces fragmentation that causes the VRAM spike during eval generation.
@@ -164,6 +171,12 @@ class M2M100Seq2SeqTrainer(Seq2SeqTrainer):
         )
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        # Re-enforce target language BOS token before every eval generation.
+        # The Trainer syncs generation_config from the tokenizer after model
+        # setup (bug #5), wiping forced_bos_token_id — this re-applies it.
+        base = self._base(model)
+        base.generation_config.forced_bos_token_id = TGT_LANG_TOKEN_ID
+
         inputs = dict(inputs)
         if "labels" in inputs and "decoder_inputs_embeds" not in inputs:
             with torch.no_grad():
@@ -182,6 +195,12 @@ class M2M100Seq2SeqTrainer(Seq2SeqTrainer):
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
 def build_compute_metrics(tokenizer):
+    """
+    Returns compute_metrics as a closure over tokenizer.
+    Must be a factory — tokenizer is a local in main(), NOT a global.
+    Using a bare module-level function that references `tokenizer` directly
+    will crash with NameError at eval time (bug #8).
+    """
     def compute_metrics(eval_preds):
         preds, labels = eval_preds
         preds  = np.where(preds  < 0, tokenizer.pad_token_id, preds)
@@ -189,6 +208,12 @@ def build_compute_metrics(tokenizer):
 
         decoded_preds  = [p.strip() for p in tokenizer.batch_decode(preds,  skip_special_tokens=True)]
         decoded_labels = [l.strip() for l in tokenizer.batch_decode(labels, skip_special_tokens=True)]
+
+        # 🔍 PROBE — print first 5 pairs each eval to confirm script + content
+        for i in range(min(5, len(decoded_preds))):
+            print(f"  REF : {decoded_labels[i]}")
+            print(f"  PRED: {decoded_preds[i]}")
+            print()
 
         bleu = sacrebleu.corpus_bleu(decoded_preds, [decoded_labels])
         chrf = sacrebleu.corpus_chrf(decoded_preds, [[l] for l in decoded_labels])
@@ -216,7 +241,9 @@ def main():
     )
     model.config.use_cache = False
 
-    # bug #5: transformers 5.x rejects forced_bos_token_id on model.config
+    # bug #5: transformers 5.x rejects forced_bos_token_id on model.config;
+    # also, the Trainer re-syncs generation_config from the tokenizer after
+    # setup — prediction_step() re-enforces this on every eval call.
     model.config.forced_bos_token_id = None
     model.generation_config.forced_bos_token_id = TGT_LANG_TOKEN_ID
 
@@ -245,11 +272,19 @@ def main():
         pad_to_multiple_of=8,
     )
 
+    # bug #9: max_new_tokens in GenerationConfig is the canonical limit.
+    # Do NOT also set generation_max_length in TrainingArguments — it maps to
+    # max_length (absolute position), conflicting with max_new_tokens (relative).
     gen_config = GenerationConfig(
         forced_bos_token_id=TGT_LANG_TOKEN_ID,
         max_new_tokens=args.max_new_tokens,
         num_beams=1,
     )
+
+    # bug #2: warmup_steps must be an integer; passing a raw float (e.g. 0.06)
+    # is silently truncated to 0, giving zero warmup and destabilising training.
+    total_steps  = (len(train_ds) // (args.batch_size * args.grad_accum)) * args.num_epochs
+    warmup_steps = max(1, int(args.warmup_ratio * total_steps))
 
     # 7. Training arguments
     training_args = Seq2SeqTrainingArguments(
@@ -261,7 +296,7 @@ def main():
         fp16=True,
         bf16=False,
         learning_rate=args.learning_rate,
-        warmup_steps=args.warmup_ratio,    # float<1 = ratio in transformers 5.x
+        warmup_steps=warmup_steps,         # bug #2: integer, computed above
         lr_scheduler_type="cosine",
         optim="adamw_torch",
         label_smoothing_factor=args.label_smoothing,
@@ -272,9 +307,9 @@ def main():
         greater_is_better=False,
         save_total_limit=3,
         predict_with_generate=True,
-        generation_max_length=args.max_new_tokens,  # keep this too
+        # generation_max_length intentionally omitted — bug #9
         generation_num_beams=1,            # bug #6: greedy eval — 4x less VRAM than beam=4
-        generation_config=gen_config,   # was: generation_config=None
+        generation_config=gen_config,
         logging_steps=20,
         report_to="none",
         dataloader_num_workers=args.dataloader_workers,
@@ -289,7 +324,7 @@ def main():
         eval_dataset=eval_ds,
         processing_class=tokenizer,
         data_collator=data_collator,
-        compute_metrics=build_compute_metrics(tokenizer),
+        compute_metrics=build_compute_metrics(tokenizer),   # bug #8: closure factory
         callbacks=[EarlyStoppingCallback(early_stopping_patience=args.early_stop_patience)],
     )
 
