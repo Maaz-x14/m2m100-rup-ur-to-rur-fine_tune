@@ -159,14 +159,14 @@ def patch_model(model: M2M100ForConditionalGeneration) -> M2M100ForConditionalGe
     Replaces model.model (M2M100Model) with PatchedM2M100Model in-place.
     Copies all weights and attributes; no reloading required.
     """
-    original: M2M100Model = model.model
-
+    original = model.model
     patched = PatchedM2M100Model(model.config)
     patched.load_state_dict(original.state_dict())
     patched.to(next(original.parameters()).dtype)
     patched.to(next(original.parameters()).device)
-
+    del model.model   # free original BEFORE assigning patched
     model.model = patched
+    torch.cuda.empty_cache()
     return model
 
 
