@@ -92,14 +92,21 @@ python inference.py \
 
 ## How LoRA is applied
 
-Adapters are injected into all four attention projection layers across **both encoder and decoder**:
+LoRA adapters are injected into all four attention projection layers across
+**both encoder and decoder** (self-attention and cross-attention):
 
-```
-q_proj, k_proj, v_proj, out_proj
-```
+    q_proj, k_proj, v_proj, out_proj
 
-`TaskType.SEQ_2_SEQ_LM` tells PEFT this is an encoder-decoder model. With defaults (`r=16`, `alpha=32`), ~4.7 M of 488 M parameters are trainable (~0.97%).
+`task_type` is intentionally NOT set in `LoraConfig`. Setting
+`task_type=TaskType.SEQ_2_SEQ_LM` wraps the model in `PeftModelForSeq2SeqLM`,
+whose `forward()` converts `decoder_input_ids → decoder_inputs_embeds` and
+passes both to `M2M100Decoder` — crashing with a ValueError. Without
+`task_type`, a generic `PeftModel` is returned with a pure pass-through
+`forward()`. Adapters are injected identically either way; `.generate()` still
+works via `__getattr__` delegation to the base model.
 
+With default settings (`r=16`, `alpha=32`), ~4.7 M of 488 M parameters are
+trainable (~0.97%).
 ---
 
 ## Tokeniser notes
@@ -111,7 +118,11 @@ Always use **`Mavkif/m2m100_rup_tokenizer_both`**, never `facebook/m2m100_418M`.
 | `__ur__` | 128095 |
 | `__roman-ur__` | 128105 |
 
-**Label tokenisation** (`prepare_data.py`): `"roman-ur"` is NOT a valid `src_lang` value (it is not in `lang_code_to_token`, causing `KeyError`), and `as_target_tokenizer()` was removed in transformers 5.x. The correct approach is to tokenise labels with `src_lang="ur"` (which prepends `__ur__`, id 128095 at position 0), then manually replace position 0 with `__roman-ur__` (id 128105). The sanity check at the end of `prepare_data.py` asserts this.
+In `prepare_data.py`, labels are tokenised with `src_lang="ur"` (prepending
+`__ur__`, id 128095 at position 0), then position 0 is manually replaced with
+`__roman-ur__` (id 128105). Setting `tokenizer.src_lang = "roman-ur"` directly
+raises a KeyError because `"roman-ur"` is not in `lang_code_to_token`, and
+`as_target_tokenizer()` was removed in transformers 5.x — neither approach works.
 
 ---
 
