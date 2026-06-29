@@ -22,6 +22,7 @@ python inference.py --input_file urdu_sentences.txt
 import argparse
 import torch
 from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
+from transformers.models.m2m_100.modeling_m2m_100 import M2M100Model
 from peft import PeftModel
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -42,6 +43,31 @@ DEFAULT_SENTENCES = [
     "وہ روز جم جاتا ہے",
     "میں نے انٹرنیٹ بند کر دیا",
 ]
+
+# ── Patch (bug #3) ────────────────────────────────────────────────────────────
+# M2M100Model.forward() in transformers 5.x computes decoder_inputs_embeds
+# from decoder_input_ids, then passes BOTH to M2M100Decoder → ValueError.
+# Fix: drop decoder_input_ids when decoder_inputs_embeds is already present.
+# Required for .generate() to work correctly.
+
+class PatchedM2M100Model(M2M100Model):
+    def forward(self, *args, **kwargs):
+        if kwargs.get("decoder_inputs_embeds") is not None:
+            kwargs.pop("decoder_input_ids", None)
+        return super().forward(*args, **kwargs)
+
+
+def patch_model(model: M2M100ForConditionalGeneration) -> M2M100ForConditionalGeneration:
+    """Swaps model.model in-place with PatchedM2M100Model."""
+    original = model.model
+    patched  = PatchedM2M100Model(model.config)
+    patched.load_state_dict(original.state_dict())
+    patched.to(next(original.parameters()).dtype)
+    patched.to(next(original.parameters()).device)
+    del model.model        # free original before assigning to avoid double VRAM
+    model.model = patched
+    torch.cuda.empty_cache()
+    return model
 
 # ── CLI args ──────────────────────────────────────────────────────────────────
 
@@ -92,13 +118,15 @@ def parse_args():
 
 def load_model_and_tokenizer(model_dir: str, device: torch.device):
     """
-    Loads:
-      1. The frozen base model (M2M100ForConditionalGeneration)
-      2. The LoRA adapters saved by train.py (PeftModel wrapper)
-      3. The custom tokenizer (Mavkif/m2m100_rup_tokenizer_both)
+    Loading order:
+      1. Load frozen base model (M2M100ForConditionalGeneration) in fp16
+      2. Apply PatchedM2M100Model (bug #3 — fixes decoder conflict in .generate())
+      3. Wrap with PeftModel to attach LoRA adapter weights
+      4. merge_and_unload() — bakes adapters into base weights, removes PEFT wrapper
+      5. Load tokenizer from saved model dir (falls back to Hub if not found)
 
-    The base model is loaded in fp16 for speed; adapters are merged in
-    fp16 as well.
+    After merge_and_unload() the model is a plain M2M100ForConditionalGeneration
+    with no adapter overhead — fastest possible inference.
     """
     print(f"[inference] Loading base model '{BASE_MODEL_ID}' ...")
     base_model = M2M100ForConditionalGeneration.from_pretrained(
@@ -106,9 +134,15 @@ def load_model_and_tokenizer(model_dir: str, device: torch.device):
         torch_dtype=torch.float16,
     )
 
+    # Must set these before patching and before .generate() is ever called.
+    # transformers 5.x rejects forced_bos_token_id on model.config directly.
+    base_model.config.forced_bos_token_id = None
+    base_model.generation_config.forced_bos_token_id = TGT_LANG_TOKEN_ID
+
+    print("[inference] Applying PatchedM2M100Model ...")
+    base_model = patch_model(base_model)
+
     print(f"[inference] Loading LoRA adapters from '{model_dir}' ...")
-    # PeftModel.from_pretrained wraps the base model and loads the adapter
-    # weights. The base model weights remain frozen; only adapters are added.
     model = PeftModel.from_pretrained(
         base_model,
         model_dir,
@@ -125,8 +159,6 @@ def load_model_and_tokenizer(model_dir: str, device: torch.device):
     model.eval()
 
     # ── Tokenizer ─────────────────────────────────────────────────────────
-    # Always load from the saved model directory first (train.py saves a copy
-    # there). Fall back to the HuggingFace Hub ID if not found locally.
     print(f"[inference] Loading tokenizer from '{model_dir}' ...")
     try:
         tokenizer = M2M100Tokenizer.from_pretrained(model_dir)
@@ -135,7 +167,6 @@ def load_model_and_tokenizer(model_dir: str, device: torch.device):
               f"falling back to '{TOKENIZER_ID}' from Hub.")
         tokenizer = M2M100Tokenizer.from_pretrained(TOKENIZER_ID)
 
-    # Set source language — this prepends __ur__ to every input
     tokenizer.src_lang = SRC_LANG
 
     return model, tokenizer
@@ -159,7 +190,6 @@ def transliterate_batch(
                                              decoder token, steering generation
                                              to Roman Urdu output
     """
-    # Tokenize — src_lang is already set on the tokenizer object
     inputs = tokenizer(
         sentences,
         return_tensors="pt",
@@ -177,7 +207,6 @@ def transliterate_batch(
             early_stopping=True,
         )
 
-    # Decode generated token ids back to text
     decoded = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
     return [s.strip() for s in decoded]
 
@@ -186,14 +215,12 @@ def transliterate_batch(
 def main():
     args = parse_args()
 
-    # ── Device selection ──────────────────────────────────────────────────────
     if args.device:
         device = torch.device(args.device)
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[inference] Using device: {device}")
 
-    # ── Collect input sentences ───────────────────────────────────────────────
     if args.input_file:
         with open(args.input_file, encoding="utf-8") as f:
             sentences = [line.strip() for line in f if line.strip()]
@@ -204,10 +231,8 @@ def main():
         sentences = DEFAULT_SENTENCES
         print("[inference] Using default demo sentences.")
 
-    # ── Load model ────────────────────────────────────────────────────────────
     model, tokenizer = load_model_and_tokenizer(args.model_dir, device)
 
-    # ── Run inference in batches ──────────────────────────────────────────────
     print(f"\n[inference] Transliterating {len(sentences)} sentence(s) "
           f"(batch_size={args.batch_size}, num_beams={args.num_beams}) ...\n")
     print("─" * 70)
@@ -221,7 +246,6 @@ def main():
         )
         all_outputs.extend(outputs)
 
-    # ── Print results ─────────────────────────────────────────────────────────
     for urdu, roman in zip(sentences, all_outputs):
         print(f"Urdu  : {urdu}")
         print(f"Roman : {roman}")
