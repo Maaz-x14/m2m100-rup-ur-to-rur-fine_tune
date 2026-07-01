@@ -37,7 +37,7 @@ pip install -r requirements.txt
 
 ```bash
 python prepare_data.py \
-    --csv data/final_transliteration_dataset.csv \
+    --csv data/transliteration_dataset.csv \
     --output_dir ./processed_dataset
 ```
 
