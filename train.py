@@ -145,6 +145,8 @@ class M2M100Seq2SeqTrainer(Seq2SeqTrainer):
 
     @staticmethod
     def _base(model):
+        if hasattr(model, "module"):        # unwrap DataParallel / DistributedDataParallel
+            model = model.module
         return model.get_base_model() if hasattr(model, "get_base_model") else model
 
     def _decoder_inputs_embeds(self, model, labels):
