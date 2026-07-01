@@ -43,3 +43,5 @@ train_compare.py
 fine_tuned_model
 
 processed_dataset/
+iss_uss_dataset_cleaned.csv
+fine_tuned_model_iss_uss_issue/
