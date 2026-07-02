@@ -14,7 +14,7 @@ Bugs fixed (do NOT reintroduce):
        passing a raw float (e.g. 0.06) is silently truncated to 0 — zero warmup
   #2 logging_dir= removed; use TENSORBOARD_LOGGING_DIR env var
   #3 M2M100 decoder conflict (training path) — M2M100Seq2SeqTrainer injects
-       decoder_inputs_embeds so shift_tokens_right is skipped
+       decoder_inputs_embeds in compute_loss ONLY so shift_tokens_right is skipped
   #3 M2M100 decoder conflict (generation path) — PatchedM2M100Model.forward()
        drops decoder_input_ids when decoder_inputs_embeds already present
   #4 task_type=TaskType.SEQ_2_SEQ_LM MUST NOT be set — PeftModelForSeq2SeqLM
@@ -34,9 +34,19 @@ Bugs fixed (do NOT reintroduce):
   #9 generation_max_length in TrainingArguments conflicts with max_new_tokens in
        GenerationConfig (different semantics: absolute vs relative position);
        removed generation_max_length — GenerationConfig.max_new_tokens is canonical
+  #10 DataParallel multi-GPU removed — single A5000 (24 GB) is sufficient for
+       2500 rows; DataParallel + fp16 + custom loss override is a minefield and
+       caused catastrophic loss divergence (loss=103→125) in run 2
+  #11 BLEU=0 eval bug — prediction_step was injecting decoder_inputs_embeds into
+       the GENERATION path; .generate() is autoregressive and handles decoder
+       inputs itself token-by-token — passing pre-computed embeddings caused it
+       to generate from fixed teacher-forced context → empty PRED strings every
+       eval. Fix: decoder_inputs_embeds injection is now compute_loss ONLY.
+       prediction_step only re-enforces forced_bos_token_id and calls super().
 """
 
 import os
+import glob
 import argparse
 import numpy as np
 from transformers import GenerationConfig
@@ -138,14 +148,30 @@ def patch_model(model: M2M100ForConditionalGeneration) -> M2M100ForConditionalGe
 
 class M2M100Seq2SeqTrainer(Seq2SeqTrainer):
     """
-    Pre-computes decoder_inputs_embeds from labels before compute_loss /
-    prediction_step so M2M100ForConditionalGeneration skips shift_tokens_right
-    and never passes decoder_input_ids into M2M100Model.
+    Injects decoder_inputs_embeds in compute_loss (training path) ONLY.
+
+    WHY decoder_inputs_embeds must NOT go into prediction_step (bug #11):
+    ─────────────────────────────────────────────────────────────────────
+    During eval with predict_with_generate=True, super().prediction_step()
+    calls model.generate() internally. .generate() is autoregressive — it
+    builds the decoder sequence one token at a time, starting from BOS.
+    If decoder_inputs_embeds is present in the batch, the parent Trainer
+    passes it to generate() as a kwargs override, which feeds the entire
+    teacher-forced embedding sequence as the decoder context BEFORE any
+    generation happens. The model then "generates" zero additional tokens
+    on top of an already-complete sequence → empty PRED strings → BLEU=0.
+
+    Fix: prediction_step only re-enforces forced_bos_token_id (bug #5)
+    and delegates to super() with a clean batch — no embeds injected.
+    decoder_inputs_embeds injection stays in compute_loss (training) only.
     """
 
     @staticmethod
     def _base(model):
-        if hasattr(model, "module"):        # unwrap DataParallel / DistributedDataParallel
+        # Unwrap DataParallel/DDP if present (safety guard; we run single GPU).
+        # get_base_model() unwraps the PEFT wrapper to reach the underlying
+        # M2M100ForConditionalGeneration.
+        if hasattr(model, "module"):
             model = model.module
         return model.get_base_model() if hasattr(model, "get_base_model") else model
 
@@ -161,6 +187,9 @@ class M2M100Seq2SeqTrainer(Seq2SeqTrainer):
         return base.model.shared(shifted)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        # Training path only — inject teacher-forced embeddings so
+        # M2M100ForConditionalGeneration skips shift_tokens_right and
+        # never passes decoder_input_ids into M2M100Model (bug #3).
         inputs = dict(inputs)
         if "labels" in inputs and "decoder_inputs_embeds" not in inputs:
             inputs["decoder_inputs_embeds"] = self._decoder_inputs_embeds(
@@ -173,18 +202,16 @@ class M2M100Seq2SeqTrainer(Seq2SeqTrainer):
         )
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
-        # Re-enforce target language BOS token before every eval generation.
-        # The Trainer syncs generation_config from the tokenizer after model
-        # setup (bug #5), wiping forced_bos_token_id — this re-applies it.
+        # ── Bug #5: re-enforce target BOS token before every eval generation ──
+        # The Trainer re-syncs generation_config from the tokenizer after model
+        # setup, wiping forced_bos_token_id. Re-apply it here on every call.
         base = self._base(model)
         base.generation_config.forced_bos_token_id = TGT_LANG_TOKEN_ID
 
-        inputs = dict(inputs)
-        if "labels" in inputs and "decoder_inputs_embeds" not in inputs:
-            with torch.no_grad():
-                inputs["decoder_inputs_embeds"] = self._decoder_inputs_embeds(
-                    model, inputs["labels"]
-                )
+        # ── Bug #11: do NOT inject decoder_inputs_embeds here ──────────────
+        # Generation is autoregressive. Passing pre-computed embeddings to
+        # generate() causes it to skip its own decoding loop → empty outputs.
+        # The batch goes to super() as-is; generate() handles decoder inputs.
         result = super().prediction_step(
             model, inputs,
             prediction_loss_only=prediction_loss_only,
@@ -199,9 +226,7 @@ class M2M100Seq2SeqTrainer(Seq2SeqTrainer):
 def build_compute_metrics(tokenizer):
     """
     Returns compute_metrics as a closure over tokenizer.
-    Must be a factory — tokenizer is a local in main(), NOT a global.
-    Using a bare module-level function that references `tokenizer` directly
-    will crash with NameError at eval time (bug #8).
+    Must be a factory — tokenizer is a local in main(), NOT a global (bug #8).
     """
     def compute_metrics(eval_preds):
         preds, labels = eval_preds
@@ -211,11 +236,22 @@ def build_compute_metrics(tokenizer):
         decoded_preds  = [p.strip() for p in tokenizer.batch_decode(preds,  skip_special_tokens=True)]
         decoded_labels = [l.strip() for l in tokenizer.batch_decode(labels, skip_special_tokens=True)]
 
-        # 🔍 PROBE — print first 5 pairs each eval to confirm script + content
+        # ── PROBE: print first 5 REF/PRED pairs + raw token IDs ─────────────
+        # PRED non-empty → generation is working.
+        # PRED empty + raw IDs are all pad/EOS → forced_bos_token_id not applied.
+        # PRED is Urdu script → wrong BOS token, model generating in src language.
+        print("\n── Eval probe (first 5 examples) ──")
         for i in range(min(5, len(decoded_preds))):
-            print(f"  REF : {decoded_labels[i]}")
-            print(f"  PRED: {decoded_preds[i]}")
+            print(f"  REF  [{i}]: {decoded_labels[i]}")
+            print(f"  PRED [{i}]: {decoded_preds[i]}")
+            print(f"  RAW IDs  : {preds[i][:15].tolist()}")
             print()
+
+        # Summary stats — catch silent empty-generation at scale
+        empty_count = sum(1 for p in decoded_preds if p == "")
+        if empty_count > 0:
+            print(f"  [WARNING] {empty_count}/{len(decoded_preds)} PRED strings are empty — "
+                  f"check forced_bos_token_id and prediction_step.")
 
         bleu = sacrebleu.corpus_bleu(decoded_preds, [decoded_labels])
         chrf = sacrebleu.corpus_chrf(decoded_preds, [[l] for l in decoded_labels])
@@ -225,10 +261,44 @@ def build_compute_metrics(tokenizer):
         }
     return compute_metrics
 
+# ── Checkpoint guard ──────────────────────────────────────────────────────────
+
+def check_checkpoint_state(output_dir: str) -> str | None:
+    """
+    Detects existing checkpoints in output_dir.
+    Prints a clear warning so you know whether training resumes or starts fresh.
+    Returns the checkpoint path to resume from, or None to start fresh.
+
+    IMPORTANT: if a previous run crashed mid-step (e.g. due to DataParallel
+    error), the checkpoint saved at that point may contain corrupted optimizer
+    state. If loss immediately looks wrong (>50 at step 1), delete checkpoints
+    and restart from scratch.
+    """
+    checkpoints = sorted(glob.glob(os.path.join(output_dir, "checkpoint-*")))
+    if not checkpoints:
+        print(f"[train] No checkpoints found in '{output_dir}' — starting fresh.")
+        return None
+
+    latest = checkpoints[-1]
+    print(f"[train] WARNING: Found {len(checkpoints)} checkpoint(s) in '{output_dir}'.")
+    print(f"[train] Will RESUME from: {latest}")
+    print(f"[train] If this is unintended (e.g. after a crashed run), delete '{output_dir}' and restart.")
+    return latest
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     args = parse_args()
+
+    # ── Single GPU enforcement (bug #10) ─────────────────────────────────────
+    # DataParallel + fp16 + custom compute_loss override caused catastrophic
+    # loss divergence in run 2 (loss=103→125). A5000 has 24 GB — more than
+    # enough for 2500 rows at batch=16. Single GPU is stable and correct.
+    if torch.cuda.device_count() > 1:
+        print(f"[train] {torch.cuda.device_count()} GPUs detected. "
+              f"Using single GPU only (CUDA_VISIBLE_DEVICES=0). "
+              f"DataParallel is disabled — see bug #10.")
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     # 1. Tokenizer
     print(f"[train] Loading tokenizer from '{TOKENIZER_ID}' ...")
@@ -266,6 +336,12 @@ def main():
     eval_ds  = dataset["validation"]
     print(f"[train] train: {len(train_ds)} | validation: {len(eval_ds)}")
 
+    # Sanity check — warn if dataset looks like the old 1911-row version
+    if len(train_ds) < 2000:
+        print(f"[train] WARNING: only {len(train_ds)} training rows detected. "
+              f"Expected ~2376 (full combined dataset). "
+              f"Did you re-run prepare_data.py on transliteration_dataset.csv?")
+
     # 6. Collator — model= omitted: supplying it injects decoder_input_ids
     #    into the batch, conflicting with M2M100's internal shift_tokens_right
     data_collator = DataCollatorForSeq2Seq(
@@ -287,6 +363,8 @@ def main():
     # is silently truncated to 0, giving zero warmup and destabilising training.
     total_steps  = (len(train_ds) // (args.batch_size * args.grad_accum)) * args.num_epochs
     warmup_steps = max(1, int(args.warmup_ratio * total_steps))
+    print(f"[train] total_steps={total_steps} | warmup_steps={warmup_steps} "
+          f"| lr={args.learning_rate}")
 
     # 7. Training arguments
     training_args = Seq2SeqTrainingArguments(
@@ -318,7 +396,10 @@ def main():
         seed=42,
     )
 
-    # 8. Trainer
+    # 8. Checkpoint guard — detect stale/corrupted checkpoints before training
+    resume_from = check_checkpoint_state(args.output_dir)
+
+    # 9. Trainer
     trainer = M2M100Seq2SeqTrainer(
         model=model,
         args=training_args,
@@ -330,17 +411,17 @@ def main():
         callbacks=[EarlyStoppingCallback(early_stopping_patience=args.early_stop_patience)],
     )
 
-    # 9. Train
+    # 10. Train
     print("[train] Starting training ...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from)
 
-    # 10. Save LoRA adapter weights only (not frozen base model)
+    # 11. Save LoRA adapter weights only (not frozen base model)
     os.makedirs(args.final_model_dir, exist_ok=True)
     model.save_pretrained(args.final_model_dir)
     tokenizer.save_pretrained(args.final_model_dir)
     print(f"[train] LoRA adapters saved to '{args.final_model_dir}'.")
 
-    # 11. Final eval
+    # 12. Final eval
     print("[train] Running final evaluation ...")
     metrics = trainer.evaluate()
     for k, v in metrics.items():
