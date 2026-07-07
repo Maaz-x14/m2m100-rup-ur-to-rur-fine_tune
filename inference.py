@@ -17,6 +17,8 @@ python inference.py --sentences "ڈاکٹر نے کہا" "کمپیوٹر بند 
 
 # Run on a plain-text file (one Urdu sentence per line):
 python inference.py --input_file urdu_sentences.txt
+
+python inference.py --model_dir ./fine_tuned_model --input_file hard_test_sentences.txt
 """
 
 import argparse

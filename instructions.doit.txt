@@ -1,0 +1,7 @@
+Generate pairs of natural Urdu sentences without any aerabs. 
+The only ambiguous word should be "اس".
+One sentence should require the Roman transliteration "iss", 
+and the other should require "uss". The distinction must arise solely from context, 
+not from diacritics. Avoid templated sentence pairs, and use diverse 
+grammatical constructions (commands, narration, dialogue, questions, present, 
+past, future, pronouns, postpositions, idioms, etc.).
