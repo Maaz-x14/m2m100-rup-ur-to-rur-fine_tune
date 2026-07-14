@@ -48,3 +48,4 @@ fine_tuned_model_iss_uss_issue/
 fine_tuned_model_previous/
 
 urdu_sentences.txt
+data/roman_urdu_map.csv
