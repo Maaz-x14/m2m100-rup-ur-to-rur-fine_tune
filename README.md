@@ -40,7 +40,7 @@ Always run this on the combined dataset before training:
 
 ```bash
 python prepare_data.py \
-    --csv data/transliteration_dataset.csv \
+    --csv data/roman_urdu_map.csv \
     --output_dir ./processed_dataset
 ```
 
@@ -60,8 +60,6 @@ If you see `train: 1911` instead of `~2376`, you ran prepare_data.py on the old 
 ### 2 — Fine-tune (A5000 / full run)
 
 ```bash
-# Delete stale checkpoints before starting a fresh run
-rm -rf ./checkpoints/*
 
 python train.py \
     --dataset_dir ./processed_dataset \
