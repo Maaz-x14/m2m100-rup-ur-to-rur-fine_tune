@@ -71,7 +71,7 @@ Default hyperparameters target an **NVIDIA A5000 (24 GB)**:
 
 Only the LoRA adapter weights are saved to `--final_model_dir` (a few MB, not the frozen base model).
 
-### 2c — Continuing from a previous run (run3: numbers + homographs)
+### 2.1 — Continuing from a previous run (run3: numbers + homographs)
 
 Checkpoint resume (built into `train.py`) only picks back up a crashed run of the same job. To continue training from a finished adapter (e.g. run2's `fine_tuned_model/`) on new data, use `--init_adapter_dir`:
 
