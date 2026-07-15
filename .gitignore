@@ -51,3 +51,8 @@ urdu_sentences.txt
 data/roman_urdu_map.csv
 fine_tuned_model_run0
 
+
+data/numbers_and_homographs.csv
+processed_dataset_run3/
+/data/transliteration_dataset.csv
+
