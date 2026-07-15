@@ -66,7 +66,7 @@ from transformers import (
     EarlyStoppingCallback,
 )
 from transformers.models.m2m_100.modeling_m2m_100 import M2M100Model
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, PeftModel
 import sacrebleu
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -98,6 +98,15 @@ def parse_args():
     p.add_argument("--early_stop_patience",  type=int,   default=3)
     p.add_argument("--max_new_tokens",       type=int,   default=128)
     p.add_argument("--dataloader_workers",   type=int,   default=2)
+    p.add_argument("--init_adapter_dir",     default=None,
+        help="Path to an EXISTING, already-trained LoRA adapter (e.g. a prior "
+             "run's fine_tuned_model/) to continue training from. If set, this "
+             "adapter's weights are loaded onto the base model as the starting "
+             "point instead of a fresh randomly-initialised adapter. This is "
+             "DIFFERENT from --output_dir checkpoint resume, which only resumes "
+             "a crashed run of THIS SAME training job. Use --init_adapter_dir to "
+             "start a NEW training run (new data, new run name) on top of a "
+             "previously completed adapter.")
     return p.parse_args()
 
 # ── LoRA configuration ────────────────────────────────────────────────────────
@@ -319,12 +328,26 @@ def main():
     model.config.forced_bos_token_id = None
     model.generation_config.forced_bos_token_id = TGT_LANG_TOKEN_ID
 
-    # 3. Patch M2M100Model — must be BEFORE get_peft_model()
+    # 3. Patch M2M100Model — must be BEFORE attaching any LoRA adapter
     model = patch_model(model)
     print("[train] PatchedM2M100Model installed.")
 
-    # 4. Apply LoRA
-    model = get_peft_model(model, build_lora_config(args))
+    # 4. Attach LoRA adapter
+    if args.init_adapter_dir:
+        # Continue training an EXISTING, already-trained adapter (e.g. run2's
+        # fine_tuned_model/) instead of starting from a fresh random adapter.
+        # This is the correct way to do "run3 continues from run2" — the
+        # checkpoint resume logic below only resumes a crashed run of THIS
+        # job, it does NOT load a previously-completed adapter.
+        print(f"[train] Loading EXISTING adapter from '{args.init_adapter_dir}' "
+              f"to continue training (NOT starting a fresh adapter).")
+        model = PeftModel.from_pretrained(
+            model, args.init_adapter_dir, is_trainable=True
+        )
+    else:
+        print("[train] No --init_adapter_dir given — starting a FRESH LoRA "
+              "adapter from the base model (run2's weights will NOT be used).")
+        model = get_peft_model(model, build_lora_config(args))
     model.print_trainable_parameters()
     assert sum(p.numel() for p in model.parameters() if p.requires_grad) > 0, \
         "No trainable params — check LORA_TARGET_MODULES names."
