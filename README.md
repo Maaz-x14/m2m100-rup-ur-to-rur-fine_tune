@@ -1,4 +1,3 @@
-
 # M2M100 LoRA Fine-Tune — Urdu → Roman Urdu Transliteration
 
 Fine-tunes [`Mavkif/m2m100_rup_ur_to_rur`](https://huggingface.co/Mavkif/m2m100_rup_ur_to_rur) with LoRA adapters (via `peft`).
@@ -8,7 +7,7 @@ Fine-tunes [`Mavkif/m2m100_rup_ur_to_rur`](https://huggingface.co/Mavkif/m2m100_
 ## Project structure
 
 ```
-m2m100-rup-ur-to-rur-fine_tune/
+m2m100-rup-ur-rto-rur-fine_tune/
 ├── data/
 │   ├── final_transliteration_dataset.csv   # original 2012-row dataset
 │   ├── transliteration_dataset.csv         # run2 combined dataset (2501 rows, incl. iss/uss)
@@ -85,7 +84,10 @@ python train.py \
     --output_dir ./checkpoints_run3 \
     --final_model_dir ./fine_tuned_model_run3 \
     --init_adapter_dir ./fine_tuned_model \
-    --learning_rate 2e-4
+    --learning_rate 2e-4 \
+    --batch_size 16 \
+    --grad_accum 4 \
+    --num_epochs 20
 ```
 
 At startup you should see:
