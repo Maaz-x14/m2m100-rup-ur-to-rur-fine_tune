@@ -7,6 +7,7 @@ sacrebleu>=2.3.1
 sentencepiece>=0.1.99
 accelerate>=0.27.0
 torchao>=0.17.0            # peft dispatch requires >=0.16.0; Colab ships 0.10.0
+jiwer                      # For benchmarks
 
 # Optional but recommended
 scipy>=1.11.0
