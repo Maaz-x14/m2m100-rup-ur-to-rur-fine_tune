@@ -41,12 +41,12 @@ pip install -r requirements.txt
 
 This is the most important decision each run. Get it wrong and you either waste compute or cause catastrophic forgetting (run3's failure).
 
-| Scenario | Decision | Reason |
-|---|---|---|
-| Large dataset (>3000 rows), full distribution coverage | **Start fresh** — no `--init_adapter_dir` | Enough data to train general capability from scratch; no risk of forgetting |
-| Small targeted dataset (<1000 rows), fixing specific failure modes | **Continue from adapter** — use `--init_adapter_dir` | Preserves general capability; focused data corrects the gap |
-| Previous adapter is degraded/regressed | **Start fresh** from base, not from bad adapter | Initialising from a degraded adapter bakes in its errors |
-| Adding domain data on top of a known-good adapter | **Continue from the good adapter** | Small domain data alone causes catastrophic forgetting if started fresh |
+| Scenario                                                           | Decision                                                      | Reason                                                                      |
+| ------------------------------------------------------------------ | ------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Large dataset (>3000 rows), full distribution coverage             | **Start fresh** — no `--init_adapter_dir`            | Enough data to train general capability from scratch; no risk of forgetting |
+| Small targeted dataset (<1000 rows), fixing specific failure modes | **Continue from adapter** — use `--init_adapter_dir` | Preserves general capability; focused data corrects the gap                 |
+| Previous adapter is degraded/regressed                             | **Start fresh** from base, not from bad adapter         | Initialising from a degraded adapter bakes in its errors                    |
+| Adding domain data on top of a known-good adapter                  | **Continue from the good adapter**                      | Small domain data alone causes catastrophic forgetting if started fresh     |
 
 **Run3 failure post-mortem:** Trained only 533 rows of numbers/homographs data continuing from run2. Dataset too small → adapter forgot run2's general capability → BLEU dropped from 70.4 to 47.97 across all categories. Fix: combined all data into one dataset and trained fresh (run4).
 
@@ -56,17 +56,18 @@ This is the most important decision each run. Get it wrong and you either waste 
 
 Benchmark = 175-sentence held-out test set, 6 categories. Run after every fine-tuning run.
 
-| Model | Dataset | Strategy | BLEU (ALL) | Numbers BLEU | Loanwords BLEU |
-|---|---|---|---|---|---|
-| mavkif_base | — | pretrained | 36.71 | 37.90 | 30.60 |
-| run1 | 2012 rows | fresh from base | 54.52 | 57.20 | 68.17 |
-| run2 | 2501 rows | fresh from base | 70.40 | 50.34 | **87.76** |
-| run3 | 563 rows | continue from run2 | 47.97 ❌ | 59.23 | 51.03 ❌ |
-| run4 | 4862 rows | fresh from base | **72.14** | **71.01** | 85.50 |
+| Model       | Dataset   | Strategy           | BLEU (ALL)      | Numbers BLEU    | Loanwords BLEU  |
+| ----------- | --------- | ------------------ | --------------- | --------------- | --------------- |
+| mavkif_base | —        | pretrained         | 36.71           | 37.90           | 30.60           |
+| run1        | 2012 rows | fresh from base    | 54.52           | 57.20           | 68.17           |
+| run2        | 2501 rows | fresh from base    | 70.40           | 50.34           | **87.76** |
+| run3        | 563 rows  | continue from run2 | 47.97 ❌        | 59.23           | 51.03 ❌        |
+| run4        | 4862 rows | fresh from base    | **72.14** | **71.01** | 85.50           |
 
 Full per-category results in `benchmark/results/benchmark_results.csv`.
 
 **run4 vs run2 highlights:**
+
 - `numbers`: 50.34 → 71.01 (+20.67) ✅ primary target fixed
 - `codeswitch`: 62.88 → 67.79 (+4.91) ✅
 - `names_places`: 67.91 → 64.85 (-3.06) acceptable
@@ -124,15 +125,15 @@ python train.py \
 
 #### All CLI flags
 
-| Flag | Default | Notes |
-|---|---|---|
-| `--batch_size` | 16 | Per-device train batch size |
-| `--grad_accum` | 4 | Effective batch = `batch_size × grad_accum` = 64 |
-| `--learning_rate` | 5e-4 | Use 5e-4 for fresh runs, 1e-4 for corrective continues |
-| `--lora_r` | 16 | LoRA rank |
-| `--lora_alpha` | 32 | Keep at `2 × lora_r` |
-| `--num_epochs` | 30 | Early stopping (patience 3) fires first in practice |
-| `--init_adapter_dir` | None | Path to existing adapter to continue from. If unset, starts fresh. |
+| Flag                   | Default | Notes                                                              |
+| ---------------------- | ------- | ------------------------------------------------------------------ |
+| `--batch_size`       | 16      | Per-device train batch size                                        |
+| `--grad_accum`       | 4       | Effective batch =`batch_size × grad_accum` = 64                 |
+| `--learning_rate`    | 5e-4    | Use 5e-4 for fresh runs, 1e-4 for corrective continues             |
+| `--lora_r`           | 16      | LoRA rank                                                          |
+| `--lora_alpha`       | 32      | Keep at`2 × lora_r`                                             |
+| `--num_epochs`       | 30      | Early stopping (patience 3) fires first in practice                |
+| `--init_adapter_dir` | None    | Path to existing adapter to continue from. If unset, starts fresh. |
 
 Only the LoRA adapter weights are saved to `--final_model_dir` (a few MB, not the frozen base model).
 
@@ -157,6 +158,7 @@ python benchmark/score_benchmark.py \
 ```
 
 **What to watch after each run:**
+
 - `classical` regressed -4.28 BLEU in run4 — if it drops further, prioritise classical Urdu data in next dataset expansion
 - `loanwords` must stay above 83 BLEU — any drop below signals general capability loss
 - `numbers` is now fixed (71.01) — should not regress below 65 in future runs
@@ -193,21 +195,21 @@ With default settings (`r=16`, `alpha=32`), ~4.7M of 488M parameters are trainab
 
 Always use **`Mavkif/m2m100_rup_tokenizer_both`**, never `facebook/m2m100_418M`.
 
-| Token | ID |
-|---|---|
-| `__ur__` | 128095 |
+| Token            | ID     |
+| ---------------- | ------ |
+| `__ur__`       | 128095 |
 | `__roman-ur__` | 128105 |
 
 ---
 
 ## Requirements
 
-| Package | Minimum | Notes |
-|---|---|---|
-| `torch` | 2.1.0 | |
-| `transformers` | 5.0.0 | |
-| `peft` | 0.10.0 | |
-| `datasets` | 2.18.0 | |
-| `sacrebleu` | 2.3.1 | |
-| `sentencepiece` | 0.1.99 | Required by M2M100Tokenizer |
-| `accelerate` | 0.27.0 | Required by Trainer fp16 path |
+| Package           | Minimum | Notes                         |
+| ----------------- | ------- | ----------------------------- |
+| `torch`         | 2.1.0   |                               |
+| `transformers`  | 5.0.0   |                               |
+| `peft`          | 0.10.0  |                               |
+| `datasets`      | 2.18.0  |                               |
+| `sacrebleu`     | 2.3.1   |                               |
+| `sentencepiece` | 0.1.99  | Required by M2M100Tokenizer   |
+| `accelerate`    | 0.27.0  | Required by Trainer fp16 path |
