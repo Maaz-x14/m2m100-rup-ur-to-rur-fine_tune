@@ -41,6 +41,7 @@ train_compare.py
 
 
 fine_tuned_model
+fine_tuned_model.zip
 
 processed_dataset/
 iss_uss_dataset_cleaned.csv
