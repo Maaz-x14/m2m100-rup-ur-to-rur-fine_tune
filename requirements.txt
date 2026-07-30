@@ -12,3 +12,4 @@ jiwer                      # For benchmarks
 # Optional but recommended
 scipy>=1.11.0
 numpy>=1.24.0
+pandas
