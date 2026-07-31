@@ -1,24 +1,110 @@
+ 
+
 # M2M100 Urdu → Roman Urdu Transliteration
 
-A reproducible LoRA fine-tuning pipeline for adapting `Mavkif/m2m100_rup_ur_to_rur` to **modern Urdu-to-Roman Urdu transliteration**, with an emphasis on contemporary vocabulary, everyday language, English loanwords written in Urdu script, and practical user-oriented text.
+A reproducible LoRA fine-tuning pipeline for adapting [`Mavkif/m2m100_rup_ur_to_rur`](https://huggingface.co/Mavkif/m2m100_rup_ur_to_rur) to **modern Urdu → Roman Urdu transliteration**.
 
-The project includes:
+The project focuses on contemporary Urdu usage, including:
 
-* A custom Urdu–Roman Urdu parallel dataset
-* Incremental dataset and experiment history
-* LoRA-based fine-tuning of M2M100
-* Reproducible data preparation
-* Training scripts
-* Standalone inference
-* A held-out benchmark suite
-* Per-category benchmark evaluation
-* Comparison across the base model and multiple fine-tuning runs
+* Everyday conversational vocabulary
+* English loanwords written in Urdu script
+* Technology-related terminology
+* Modern household vocabulary
+* User-oriented text
+* Contemporary code-switched usage
 
-The final Run 4 model is published separately on Hugging Face.
+The project provides the complete engineering workflow behind the released **Run 4** model:
+
+```text
+Canonical Dataset
+      │
+      ▼
+Data Preparation
+      │
+      ▼
+M2M100 + LoRA Fine-Tuning
+      │
+      ▼
+Run 4 Model
+      │
+      ├──────────────► Benchmark Evaluation
+      │
+      ▼
+Hugging Face Model
+      │
+      ▼
+Production Inference API
+```
 
 ---
 
-## Project Overview
+# Project Resources
+
+The project is split across GitHub and Hugging Face.
+
+| Resource                         | Purpose                                                                        |
+| -------------------------------- | ------------------------------------------------------------------------------ |
+| **Fine-Tuning Repository** | Training, preprocessing, benchmarking, reproducibility, and experiment history |
+| **Hugging Face Dataset**   | Canonical 4,860-example Urdu → Roman Urdu dataset                             |
+| **Hugging Face Model**     | Released Run 4 LoRA adapter and canonical model card                           |
+| **Inference Repository**   | Production-oriented FastAPI inference service                                  |
+
+### Canonical resources
+
+* **Dataset:** [`Maaz-x14/urdu-to-roman-urdu`](https://huggingface.co/datasets/Maaz-x14/urdu-to-roman-urdu)
+* **Run 4 Model:** [`Maaz-x14/m2m100-ur-to-roman-urdu`](https://huggingface.co/Maaz-x14/m2m100-ur-to-roman-urdu)
+* **Production Inference:** [`Maaz-x14/m2m100-roman-deploy`](https://github.com/Maaz-x14/m2m100-roman-deploy)
+
+### Repository ecosystem
+
+```text
+                    ┌──────────────────────────────┐
+                    │  Hugging Face Dataset        │
+                    │  Maaz-x14/urdu-to-roman-urdu │
+                    │                              │
+                    │  Canonical 4,860 examples    │
+                    └──────────────┬───────────────┘
+                                   │
+                                   │
+                                   ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 Fine-Tuning Repository                      │
+│                                                             │
+│  prepare_data.py → train.py → benchmark → evaluation        │
+│                                                             │
+│  Experiment history + reproducibility documentation         │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               │ Run 4 adapter
+                               ▼
+                    ┌──────────────────────────────┐
+                    │  Hugging Face Model          │
+                    │  Maaz-x14/m2m100-ur-to-      │
+                    │  roman-urdu                  │
+                    │                              │
+                    │  Production Run 4 Adapter    │
+                    └──────────────┬───────────────┘
+                                   │
+                                   │ Model loading
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │  Inference Repository        │
+                    │  m2m100-roman-deploy         │
+                    │                              │
+                    │  FastAPI Production API      │
+                    └──────────────────────────────┘
+```
+
+The responsibilities are intentionally separated:
+
+* **This repository:** How the model was developed, trained, evaluated, and reproduced.
+* **Hugging Face Dataset:** What data was used.
+* **Hugging Face Model:** The released Run 4 model artifact.
+* **Inference Repository:** How to deploy and serve the model.
+
+---
+
+# Architecture
 
 The project starts from:
 
@@ -26,66 +112,69 @@ The project starts from:
 Mavkif/m2m100_rup_ur_to_rur
 ```
 
-and adapts it for a more contemporary Urdu distribution.
-
-The motivation for additional fine-tuning was practical.
-
-The base model was trained using the `Mavkif/Roman-Urdu-Parl-split` data. During development, we identified a gap between the language distribution represented in the available training resources and the language required by the intended application.
-
-In particular, modern Urdu frequently contains:
-
-* Everyday conversational vocabulary
-* English loanwords written in Urdu script
-* Technology-related terms
-* Modern household vocabulary
-* User-generated language
-* Contemporary code-switched usage
-
-Examples include words such as:
+and adapts it using LoRA.
 
 ```text
-فین       → fan
-لائٹ      → light
-بلب       → bulb
-وائی فائی → wifi
-ٹیبل      → table
+                  Mavkif/m2m100_rup_ur_to_rur
+                              │
+                              │ Frozen Base Model
+                              ▼
+                    M2M100 Seq2Seq Model
+                              │
+                              │ LoRA Fine-Tuning
+                              ▼
+                       LoRA Adapter
+                              │
+                              ▼
+                  Urdu → Roman Urdu
+                    Transliteration
 ```
 
-The project therefore created an additional targeted Urdu–Roman Urdu corpus and used it for further adaptation.
-
-The result is a model specifically optimized for the practical transliteration task:
+At inference time:
 
 ```text
-Urdu Nastaliq
-      │
-      ▼
-M2M100 + LoRA Adapter
-      │
-      ▼
-Roman Urdu
+Urdu Nastaliq Input
+        │
+        ▼
+     Tokenizer
+        │
+        ▼
+ M2M100 Base Model
+        +
+   Run 4 LoRA Adapter
+        │
+        ▼
+    Generation
+        │
+        ▼
+Roman Urdu Output
+```
+
+The project uses:
+
+```text
+Base Model:
+Mavkif/m2m100_rup_ur_to_rur
+
+Tokenizer:
+Mavkif/m2m100_rup_tokenizer_both
+```
+
+The target language token used by the training pipeline is:
+
+```text
+__roman-ur__
+```
+
+with target token ID:
+
+```text
+128105
 ```
 
 ---
 
-## Key Components
-
-| Component                         | Purpose                                                      |
-| --------------------------------- | ------------------------------------------------------------ |
-| `data/rur_to_ur_data.csv`         | Canonical ordered Urdu–Roman Urdu corpus used by the project |
-| `prepare_data.py`                 | Converts raw CSV data into tokenized Hugging Face datasets   |
-| `train.py`                        | Performs LoRA fine-tuning                                    |
-| `inference.py`                    | Runs transliteration using a trained adapter                 |
-| `benchmark/run_benchmark.py`      | Generates predictions on the held-out benchmark              |
-| `benchmark/score_benchmark.py`    | Calculates benchmark metrics and category-level results      |
-| `benchmark/benchmark_dataset.csv` | Held-out benchmark dataset                                   |
-| `benchmark/results/`              | Benchmark predictions and aggregated results                 |
-| `DATASET_HISTORY.md`              | Documents dataset construction and lineage                   |
-| `dataset_card.md`                 | Documents the dataset itself                                 |
-| `model_card.md`                   | Documents the released model                                 |
-
----
-
-## Repository Structure
+# Repository Structure
 
 ```text
 m2m100-rup-ur-to-rur-fine_tune/
@@ -103,608 +192,70 @@ m2m100-rup-ur-to-rur-fine_tune/
 │       └── predictions_run4.csv
 │
 ├── data/
-│   └── rur_to_ur_data.csv
+│   └── ur_to_rur_data.csv  Place dataset here, get it from (Maaz-x14/urdu-to-roman-urdu)
 │
-├── dataset_card.md
 ├── DATASET_HISTORY.md
+├── EXPERIMENT_HISTORY.md
 ├── dataset_run_summary.csv
+│
+├── fine_tuned_model/
+│   ├── adapter_config.json
+│   ├── adapter_model.safetensors
+│   ├── added_tokens.json
+│   ├── README.md
+│   ├── sentencepiece.bpe.model
+│   ├── tokenizer_config.json
+│   └── vocab.json
 │
 ├── inference.py
 ├── prepare_data.py
+├── README.md
 ├── requirements.txt
-├── train.py
-└── README.md
+└── train.py
 ```
 
-The released model weights are not intended to be maintained as Git history in this repository. The production adapter is distributed through Hugging Face.
+### Key files
+
+| File                                | Purpose                                      |
+| ----------------------------------- | -------------------------------------------- |
+| `data/ur_to_rur_data.csv`         | Local copy of the canonical training corpus  |
+| `prepare_data.py`                 | Prepares the raw CSV for training            |
+| `train.py`                        | LoRA fine-tuning pipeline                    |
+| `inference.py`                    | Local inference using a trained adapter      |
+| `benchmark/benchmark_dataset.csv` | Held-out benchmark dataset                   |
+| `benchmark/run_benchmark.py`      | Generates model predictions                  |
+| `benchmark/score_benchmark.py`    | Scores benchmark predictions                 |
+| `benchmark/results/`              | Predictions and aggregated benchmark results |
+| `DATASET_HISTORY.md`              | Dataset construction and lineage             |
+| `EXPERIMENT_HISTORY.md`           | Full experiment chronology                   |
+| `dataset_run_summary.csv`         | Run-level dataset summary                    |
+
+The production Run 4 adapter is distributed through Hugging Face rather than being treated as the primary model distribution mechanism of this GitHub repository.
 
 ---
 
-# Architecture
+# Quick Start
 
-## Model Architecture
+The following workflow is the recommended order for reproducing the project.
 
-The project uses a sequence-to-sequence Transformer architecture based on M2M100.
-
-The adaptation stack is:
-
-```text
-                    ┌────────────────────────────┐
-                    │ Mavkif/m2m100_rup_ur_to_rur│
-                    │                            │
-                    │ M2M100 Seq2Seq Model       │
-                    └─────────────┬──────────────┘
-                                  │
-                                  │ Frozen Base
-                                  ▼
-                    ┌───────────────────────────┐
-                    │        LoRA Adapter       │
-                    │                           │
-                    │ Parameter-efficient       │
-                    │ fine-tuning               │
-                    └─────────────┬─────────────┘
-                                  │
-                                  ▼
-             ┌─────────────────────────────────────────┐
-             │ Urdu → Roman Urdu Transliteration       │
-             └─────────────────────────────────────────┘
-```
-
-The base model provides the pretrained multilingual sequence-to-sequence capability.
-
-LoRA provides the task-specific adaptation without updating the full base model.
-
----
-
-## Tokenization
-
-The project uses the tokenizer associated with the M2M100 adaptation:
-
-```text
-Mavkif/m2m100_rup_tokenizer_both
-```
-
-The tokenizer configuration supports the project's Urdu and Roman Urdu language setup.
-
-Data preparation converts the raw parallel CSV into tokenized examples suitable for sequence-to-sequence fine-tuning.
-
----
-
-# Training Pipeline
-
-The complete training pipeline is:
-
-```text
-Raw Urdu–Roman Urdu CSV
-          │
-          ▼
-   prepare_data.py
-          │
-          ▼
-Tokenization + Train/Validation Split
-          │
-          ▼
-   Hugging Face Dataset
-          │
-          ▼
-       train.py
-          │
-          ▼
-M2M100 Base Model + LoRA
-          │
-          ▼
-    LoRA Adapter
-          │
-          ▼
-     Benchmarking
-          │
-          ▼
-     Evaluation
-```
-
-The pipeline is intentionally divided into separate stages so that data preparation, training, inference, and evaluation can be reproduced independently.
-
----
-
-# Dataset
-
-The project's custom dataset contains:
-
-```text
-4,860 Urdu–Roman Urdu parallel pairs
-```
-
-The two columns are:
-
-```text
-urdu
-roman_urdu
-```
-
-The dataset was assembled from multiple sources and collection strategies, including:
-
-1. AI-assisted generation
-2. Urdu user-oriented query data obtained from another project
-3. Urdu text collected through search/web sources and converted to Roman Urdu
-
-The dataset was manually reviewed by a native Urdu speaker and additionally checked using AI-assisted validation.
-
-The dataset is intended to complement existing Urdu–Roman Urdu resources by providing additional coverage of contemporary Urdu usage.
-
-For complete information about data collection, validation, statistics, and provenance, see:
-
-* `dataset_card.md`
-* `DATASET_HISTORY.md`
-
-The canonical dataset is maintained separately as part of the project's dataset release.
-
----
-
-# Data Preparation
-
-`prepare_data.py` is responsible for converting the raw parallel corpus into the dataset consumed by the training pipeline.
-
-Conceptually:
-
-```text
-data/rur_to_ur_data.csv
-          │
-          ▼
-     CSV Loading
-          │
-          ▼
-      Validation
-          │
-          ▼
-      Tokenization
-          │
-          ▼
-Train / Validation Split
-          │
-          ▼
-Processed Hugging Face Dataset
-```
-
-Run:
+## 1. Clone Repository
 
 ```bash
-python prepare_data.py \
-    --csv data/rur_to_ur_data.csv \
-    --output_dir ./processed_dataset
-```
-
-The resulting processed dataset is then passed to `train.py`.
-
-### Important
-
-The dataset contains duplicate and repeated content.
-
-Therefore, the train/validation split should not be interpreted as a fully independent linguistic benchmark.
-
-The project's separate benchmark dataset is used for final comparative evaluation.
-
----
-
-# Training
-
-Training is performed using LoRA-based parameter-efficient fine-tuning.
-
-The general workflow is:
-
-```bash
-python prepare_data.py \
-    --csv data/rur_to_ur_data.csv \
-    --output_dir ./processed_dataset
-```
-
-Then:
-
-```bash
-python train.py \
-    --dataset_dir ./processed_dataset \
-    --output_dir ./checkpoints \
-    --final_model_dir ./fine_tuned_model
-```
-
-The training script handles:
-
-* Loading the base M2M100 model
-* Loading the prepared dataset
-* Configuring LoRA
-* Fine-tuning the model
-* Validation during training
-* Saving the resulting adapter
-
-The resulting directory contains the LoRA adapter rather than a complete copy of the base model.
-
----
-
-# LoRA Fine-Tuning
-
-The project uses parameter-efficient fine-tuning rather than updating every parameter in the M2M100 model.
-
-Conceptually:
-
-```text
-Base M2M100
-     │
-     ├── Frozen pretrained parameters
-     │
-     └── Trainable LoRA parameters
-                  │
-                  ▼
-         Task-specific adaptation
-```
-
-This approach provides several practical advantages:
-
-* Lower memory requirements
-* Smaller trained artifacts
-* Faster fine-tuning
-* Easier distribution of adapter weights
-* Preservation of the pretrained base model
-
-The adapter must therefore be loaded together with the compatible base model and tokenizer.
-
----
-
-# Reproducing Run 4
-
-Run 4 is the final consolidated training experiment documented by this project.
-
-Its dataset lineage is:
-
-```text
-Run 1 + Run 2 combined dataset
-                │
-                ├───────────────┐
-                │               │
-                ▼               ▼
-       Expanded Run 3      Additional data
-                │
-                └───────────────┐
-                                ▼
-                         Run 4 Dataset
-                                │
-                                ▼
-                       Fresh fine-tuning
-                         from base model
-```
-
-The important distinction is:
-
-* **Run 3:** 563-row training run
-* **Expanded Run 3:** later-expanded data collection
-* **Run 4:** trained using the consolidated data resulting from the Run 1/Run 2 lineage combined with the Expanded Run 3 data
-
-The exact dataset lineage is documented in:
-
-```text
-DATASET_HISTORY.md
-```
-
-The final raw dataset contains:
-
-```text
-4,860 rows
-```
-
-To reproduce Run 4:
-
-### Step 1 — Obtain the dataset
-
-Place the canonical dataset at:
-
-```text
-data/rur_to_ur_data.csv
-```
-
-### Step 2 — Prepare the dataset
-
-```bash
-python prepare_data.py \
-    --csv data/rur_to_ur_data.csv \
-    --output_dir ./processed_dataset
-```
-
-### Step 3 — Train the model
-
-```bash
-python train.py \
-    --dataset_dir ./processed_dataset \
-    --output_dir ./checkpoints \
-    --final_model_dir ./fine_tuned_model
-```
-
-The exact hyperparameters used for the published Run 4 model should be taken from the finalized `train.py` configuration and the experiment history rather than inferred from earlier README versions.
-
-This repository intentionally separates:
-
-```text
-Reproduction workflow
-        │
-        ├── Data preparation
-        ├── Training
-        ├── Inference
-        └── Benchmarking
-```
-
-from:
-
-```text
-Historical experiment record
-        │
-        └── DATASET_HISTORY.md
+git clone https://github.com/Maaz-x14/m2m100-rup-ur-to-rur-fine_tune.git
+cd m2m100-rup-ur-to-rur-fine_tune
 ```
 
 ---
 
-# Experiment History
+## 2. Create Virtual Environment
 
-The project went through multiple fine-tuning iterations.
-
-The high-level lineage is:
-
-```text
-Base Model
-    │
-    ▼
-Run 1
-    │
-    ▼
-Run 2
-    │
-    ▼
-Run 3
-    │
-    ├── 563-row targeted training run
-    │
-    └── Observed regression
-            │
-            ▼
-    Expanded data collection
-            │
-            ▼
-          Run 4
-```
-
-Run 3 is particularly important because it demonstrated a failure mode of continuing training on a small targeted dataset.
-
-The model's performance degraded when a relatively small corrective dataset was used as the primary training distribution.
-
-Run 4 therefore used the consolidated dataset and restarted fine-tuning from the base model rather than continuing from the degraded Run 3 adapter.
-
-The detailed experiment history, dataset lineage, and run-specific information should be maintained in:
-
-```text
-DATASET_HISTORY.md
-```
-
-and the project's experiment history documentation.
-
----
-
-# Benchmarking
-
-The project includes a separate benchmark pipeline.
-
-```text
-Benchmark Dataset
-        │
-        ▼
-run_benchmark.py
-        │
-        ▼
-Model Predictions
-        │
-        ▼
-score_benchmark.py
-        │
-        ▼
-Overall + Category Metrics
-```
-
-The benchmark is designed to compare:
-
-* The original base model
-* Run 1
-* Run 2
-* Run 3
-* Run 4
-
-Prediction files are stored under:
-
-```text
-benchmark/results/
-```
-
----
-
-## Run Benchmark
-
-To generate predictions:
-
-```bash
-python benchmark/run_benchmark.py
-```
-
-The exact CLI arguments supported by the current script should be checked with:
-
-```bash
-python benchmark/run_benchmark.py --help
-```
-
-The script generates model predictions for the benchmark dataset.
-
----
-
-## Score Predictions
-
-Run:
-
-```bash
-python benchmark/score_benchmark.py
-```
-
-This evaluates the generated predictions and produces the benchmark results.
-
-The aggregated results are stored in:
-
-```text
-benchmark/results/benchmark_results.csv
-```
-
----
-
-# Benchmark Dataset
-
-The benchmark dataset is maintained separately from the training corpus:
-
-```text
-benchmark/benchmark_dataset.csv
-```
-
-It is intended to provide a consistent evaluation set for comparing different model versions.
-
-The benchmark is categorized into linguistic groups used to analyze model behavior beyond a single aggregate score.
-
-The categories include:
-
-* Numbers
-* Loanwords
-* Code-switching
-* Names and places
-* Classical Urdu
-* Other targeted transliteration cases
-
-The benchmark should be treated as an internal project benchmark rather than a universally standardized Urdu transliteration benchmark.
-
----
-
-# Benchmark Results
-
-The benchmark results should be interpreted together with the per-category results stored in:
-
-```text
-benchmark/results/benchmark_results.csv
-```
-
-The project compares model versions rather than reporting only the final Run 4 score.
-
-The comparison is intended to answer two questions:
-
-1. Did additional fine-tuning improve overall transliteration?
-2. Did it improve the specific linguistic failure modes targeted by the additional data?
-
-This distinction is important because an aggregate BLEU score can hide regressions in individual categories.
-
-For example, a model may improve on modern loanwords while simultaneously becoming worse on classical Urdu.
-
-Therefore, the project reports both:
-
-```text
-Overall performance
-```
-
-and:
-
-```text
-Category-level performance
-```
-
----
-
-# Inference
-
-The project provides `inference.py` for running transliteration with the trained adapter.
-
-The inference architecture is:
-
-```text
-Urdu Input
-    │
-    ▼
-Tokenizer
-    │
-    ▼
-M2M100 Base Model
-    +
-LoRA Adapter
-    │
-    ▼
-Generation
-    │
-    ▼
-Roman Urdu Output
-```
-
-Run:
-
-```bash
-python inference.py
-```
-
-For the exact supported arguments:
-
-```bash
-python inference.py --help
-```
-
-The production model is distributed through Hugging Face.
-
-The recommended production deployment should therefore load:
-
-```text
-Base Model
-      +
-Run 4 LoRA Adapter
-      +
-Compatible Tokenizer
-```
-
-rather than relying on the local `fine_tuned_model/` directory.
-
----
-
-# Model Distribution
-
-The GitHub repository contains the engineering and reproducibility code.
-
-The Hugging Face model repository contains the released Run 4 adapter and its canonical model documentation.
-
-The Hugging Face dataset repository contains the released dataset and its dataset card.
-
-The intended project structure is therefore:
-
-```text
-GitHub
-│
-├── Code
-├── Training Pipeline
-├── Benchmarking
-├── Reproducibility
-└── Experiment Documentation
-        │
-        ├───────────────┐
-        ▼               ▼
-Hugging Face        Hugging Face
-Model               Dataset
-│                   │
-├── Model Card      ├── Dataset Card
-└── Run 4 Adapter   └── 4,860 Examples
-```
-
----
-
-# Installation
-
-Create a virtual environment:
+Create a dedicated Python virtual environment:
 
 ```bash
 python -m venv .venv
 ```
 
-Activate it:
+Activate it.
 
 ### Linux / macOS
 
@@ -718,117 +269,777 @@ source .venv/bin/activate
 .venv\Scripts\activate
 ```
 
-Install dependencies:
+Verify that the environment is active:
+
+```bash
+which python
+```
+
+On Windows:
+
+```powershell
+where python
+```
+
+---
+
+## 3. Install Dependencies
+
+Upgrade pip:
+
+```bash
+python -m pip install --upgrade pip
+```
+
+Install the project dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-The exact package versions used for a reproducible experiment should be taken from the finalized `requirements.txt`.
+The training pipeline uses the M2M100, PEFT, PyTorch, Hugging Face Datasets, Accelerate, and SacreBLEU ecosystem.
+
+For GPU training, ensure that your PyTorch installation is compatible with your CUDA environment.
 
 ---
 
-# Reproducibility Checklist
+## 4. Obtain Dataset
 
-To reproduce an experiment, record:
+The canonical dataset is hosted on Hugging Face:
 
-* Base model identifier
-* Tokenizer identifier
-* Dataset version
-* Dataset row count
-* Train/validation split
-* Random seed
-* LoRA configuration
-* Learning rate
-* Batch size
-* Gradient accumulation
-* Number of epochs
-* Early stopping configuration
-* Hardware
-* Software versions
-* Output adapter
-* Benchmark version
-* Evaluation results
+**[`Maaz-x14/urdu-to-roman-urdu`](https://huggingface.co/datasets/Maaz-x14/urdu-to-roman-urdu)**
 
-A model result should not be considered fully reproducible from the final BLEU score alone.
-
-The combination of:
+The released dataset contains:
 
 ```text
-Code
-+
-Dataset
-+
-Configuration
-+
-Randomness
-+
-Evaluation Benchmark
+4,860 Urdu–Roman Urdu parallel examples
 ```
 
-defines the experiment.
+For local Run 4 reproduction, place the canonical dataset at:
+
+```text
+data/ur_to_rur_data.csv
+```
+
+The expected columns are:
+
+```text
+urdu
+roman_urdu
+```
+
+The local filename is not itself the source of truth; the canonical dataset release is the Hugging Face dataset repository above.
+
+---
+
+## 5. Prepare Dataset
+
+Run:
+
+```bash
+python prepare_data.py \
+    --csv data/ur_to_rur_data.csv \
+    --output_dir ./processed_dataset
+```
+
+This produces the processed dataset consumed by the training pipeline.
+
+The resulting directory is:
+
+```text
+processed_dataset/
+```
+
+---
+
+## 6. Train Run 4
+
+Run:
+
+```bash
+python train.py \
+    --dataset_dir ./processed_dataset \
+    --output_dir ./checkpoints \
+    --final_model_dir ./fine_tuned_model
+```
+
+The training script:
+
+1. Loads the M2M100 tokenizer.
+2. Loads the M2M100 base model.
+3. Configures the Roman Urdu target language.
+4. Applies the M2M100 generation-path patch required by the training implementation.
+5. Attaches a LoRA adapter.
+6. Loads the prepared dataset.
+7. Trains with sequence-to-sequence training.
+8. Evaluates during training.
+9. Saves the LoRA adapter and tokenizer.
+10. Runs final evaluation.
+
+The resulting model directory contains the trained adapter and tokenizer artifacts.
+
+---
+
+## 7. Run Benchmark
+
+The benchmark uses a separate held-out dataset:
+
+```text
+benchmark/benchmark_dataset.csv
+```
+
+Run:
+
+```bash
+python benchmark/run_benchmark.py --help
+```
+
+Review the supported arguments, then execute the benchmark using the desired model configuration.
+
+The benchmark pipeline is designed to generate predictions for model versions including:
+
+```text
+Mavkif base
+Run 1
+Run 2
+Run 3
+Run 4
+```
+
+Predictions are stored under:
+
+```text
+benchmark/results/
+```
+
+---
+
+## 8. Score Benchmark
+
+After generating predictions, run:
+
+```bash
+python benchmark/score_benchmark.py --help
+```
+
+Then execute the scoring command supported by the current script.
+
+The aggregated results are written to:
+
+```text
+benchmark/results/benchmark_results.csv
+```
+
+The benchmark should be evaluated at both:
+
+* Overall level
+* Category level
+
+This allows improvements and regressions to be identified for specific linguistic categories rather than relying only on a single aggregate metric.
+
+---
+
+## 9. Run Local Inference
+
+To inspect the supported inference interface:
+
+```bash
+python inference.py --help
+```
+
+Run the inference script using the supported arguments.
+
+The conceptual inference path is:
+
+```text
+Urdu Text
+    │
+    ▼
+Tokenizer
+    │
+    ▼
+M2M100 Base
+    +
+LoRA Adapter
+    │
+    ▼
+Generation
+    │
+    ▼
+Roman Urdu
+```
+
+For production deployment, use the dedicated inference repository rather than treating this local script as the production API.
+
+---
+
+# Reproducing Run 4
+
+Run 4 is the current final training experiment.
+
+The important dataset lineage is:
+
+```text
+Run 1
+  │
+  └──► Run 2
+          │
+          └──► Run 1 + Run 2 Combined Dataset
+                         │
+                         ▼
+                  Expanded Run 3 Data
+                         │
+                         ▼
+                    Run 4 Dataset
+                         │
+                         ▼
+              Fresh Fine-Tuning from Base
+                         │
+                         ▼
+                       Run 4
+```
+
+There is an important distinction between:
+
+* **Run 3:** The 563-row training run.
+* **Expanded Run 3:** Additional data collected after the Run 3 training run.
+* **Run 4:** The final training run using the consolidated dataset.
+
+Run 4 was trained from the base model using the consolidated dataset rather than continuing from the degraded Run 3 adapter.
+
+For the complete chronology, see:
+
+```text
+EXPERIMENT_HISTORY.md
+```
+
+For dataset construction and lineage, see:
+
+```text
+DATASET_HISTORY.md
+```
+
+### Complete Run 4 reproduction sequence
+
+```bash
+# 1. Clone
+git clone https://github.com/Maaz-x14/m2m100-rup-ur-to-rur-fine_tune.git
+cd m2m100-rup-ur-to-rur-fine_tune
+
+# 2. Create environment
+python -m venv .venv
+
+# 3. Activate environment
+source .venv/bin/activate
+
+# 4. Install dependencies
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+# 5. Place the canonical dataset at:
+# data/ur_to_rur_data.csv
+
+# 6. Prepare data
+python prepare_data.py \
+    --csv data/ur_to_rur_data.csv \
+    --output_dir ./processed_dataset
+
+# 7. Train Run 4
+python train.py \
+    --dataset_dir ./processed_dataset \
+    --output_dir ./checkpoints \
+    --final_model_dir ./fine_tuned_model
+
+# 8. Inspect benchmark interface
+python benchmark/run_benchmark.py --help
+
+# 9. Generate benchmark predictions
+python benchmark/run_benchmark.py
+
+# 10. Inspect scoring interface
+python benchmark/score_benchmark.py --help
+
+# 11. Score benchmark
+python benchmark/score_benchmark.py
+
+# 12. Inspect local inference interface
+python inference.py --help
+```
+
+> **Reproducibility note:** The commands above reproduce the project workflow. Exact numerical reproducibility also depends on the Python/package versions, hardware, CUDA environment, random seeds, and the exact dataset version used.
+
+---
+
+# Dataset
+
+The canonical dataset contains:
+
+```text
+4,860 Urdu–Roman Urdu parallel examples
+```
+
+Columns:
+
+```text
+urdu
+roman_urdu
+```
+
+The dataset was created because available Urdu → Roman Urdu resources did not sufficiently cover the modern language distribution targeted by this project.
+
+The additional corpus focuses on patterns such as:
+
+```text
+فین       → fan
+لائٹ      → light
+بلب       → bulb
+وائی فائی → wifi
+ٹیبل      → table
+```
+
+The dataset was assembled using three broad approaches:
+
+1. AI-assisted generation
+2. Urdu user-query data obtained from another project and converted into Urdu → Roman Urdu pairs
+3. Urdu text collected through search/web sources and converted into Roman Urdu
+
+The resulting data was reviewed manually by a native Urdu speaker and additionally checked through AI-assisted validation.
+
+The canonical public release is:
+
+**[`Maaz-x14/urdu-to-roman-urdu`](https://huggingface.co/datasets/Maaz-x14/urdu-to-roman-urdu)**
+
+For detailed dataset provenance and construction history, see:
+
+```text
+DATASET_HISTORY.md
+```
+
+---
+
+# Training Pipeline
+
+The training system is divided into four major stages:
+
+```text
+┌─────────────────────────┐
+│ Canonical Dataset       │
+│ 4,860 Urdu/Roman Urdu   │
+│ parallel examples       │
+└────────────┬────────────┘
+             │
+             ▼
+┌─────────────────────────┐
+│ prepare_data.py         │
+│                         │
+│ Dataset preparation     │
+│ Tokenization            │
+│ Train/validation split  │
+└────────────┬────────────┘
+             │
+             ▼
+┌─────────────────────────┐
+│ train.py                │
+│                         │
+│ M2M100 base model       │
+│ + LoRA adapter          │
+│ + Seq2Seq training      │
+└────────────┬────────────┘
+             │
+             ▼
+┌─────────────────────────┐
+│ Trained LoRA Adapter    │
+└────────────┬────────────┘
+             │
+             ├──────────────► Local Inference
+             │
+             ▼
+┌─────────────────────────┐
+│ Held-Out Benchmark      │
+│                         │
+│ Base vs Run 1–4         │
+└────────────┬────────────┘
+             │
+             ▼
+┌─────────────────────────┐
+│ Overall + Category      │
+│ Evaluation              │
+└─────────────────────────┘
+```
+
+---
+
+## LoRA Configuration
+
+The current training implementation targets:
+
+```text
+q_proj
+k_proj
+v_proj
+out_proj
+```
+
+The default LoRA configuration in `train.py` is:
+
+```text
+r = 16
+alpha = 32
+dropout = 0.1
+bias = none
+```
+
+Training defaults include:
+
+```text
+Epochs:                  30
+Train batch size:        16
+Evaluation batch size:   8
+Gradient accumulation:   4
+Learning rate:           5e-4
+Warmup ratio:            0.06
+Label smoothing:         0.1
+Early stopping patience: 3
+Max new tokens:          128
+DataLoader workers:      2
+Seed:                    42
+```
+
+The training implementation uses:
+
+```text
+FP16
+Single-GPU execution
+Greedy generation during evaluation
+Cosine learning-rate scheduling
+AdamW
+```
+
+These are the current defaults encoded in `train.py`.
+
+---
+
+# Benchmarking
+
+The repository contains a separate benchmark suite so that model versions can be compared consistently.
+
+```text
+benchmark/benchmark_dataset.csv
+          │
+          ▼
+  run_benchmark.py
+          │
+          ▼
+     Predictions
+          │
+          ▼
+ score_benchmark.py
+          │
+          ▼
+benchmark_results.csv
+```
+
+The benchmark includes comparison data for:
+
+```text
+Mavkif Base
+Run 1
+Run 2
+Run 3
+Run 4
+```
+
+The prediction artifacts are:
+
+```text
+benchmark/results/
+├── predictions_mavkif_base.csv
+├── predictions_run1.csv
+├── predictions_run2.csv
+├── predictions_run3.csv
+└── predictions_run4.csv
+```
+
+The aggregated results are:
+
+```text
+benchmark/results/benchmark_results.csv
+```
+
+The benchmark is intended to answer two questions:
+
+1. Did fine-tuning improve overall Urdu → Roman Urdu transliteration?
+2. Did fine-tuning improve the specific linguistic patterns targeted by the additional dataset?
+
+The second question is critical.
+
+A model can improve on modern loanwords while regressing on other categories.
+
+Therefore, the project evaluates both:
+
+```text
+Overall Metrics
+```
+
+and:
+
+```text
+Category-Level Metrics
+```
+
+The benchmark is a project-specific evaluation suite and should not be interpreted as a universal standardized Urdu transliteration benchmark.
+
+---
+
+# Run History
+
+The project's high-level experiment progression is:
+
+```text
+Base Model
+    │
+    ▼
+Run 1
+2,012 rows
+    │
+    ▼
+Run 2
+489 additional rows
+    │
+    ▼
+Run 1 + Run 2
+2,500 actual rows
+    │
+    ▼
+Run 3
+563-row targeted training run
+    │
+    ▼
+Regression / training issues
+    │
+    ▼
+Expanded Run 3 data collection
+    │
+    ▼
+Run 4
+Consolidated dataset
+4,860 rows
+    │
+    ▼
+Fresh fine-tuning from base model
+```
+
+Run 3 is an important part of the project's engineering history.
+
+The experiment demonstrated that a small corrective dataset can cause regression when used as the dominant training distribution.
+
+Run 4 therefore used the consolidated dataset and restarted from the base model.
+
+For the full chronology, including bugs, failed approaches, recovery steps, and lessons learned:
+
+```text
+EXPERIMENT_HISTORY.md
+```
+
+For the dataset-specific lineage:
+
+```text
+DATASET_HISTORY.md
+```
+
+---
+
+# Model Distribution
+
+The current production-oriented model is:
+
+**[`Maaz-x14/m2m100-ur-to-roman-urdu`](https://huggingface.co/Maaz-x14/m2m100-ur-to-roman-urdu)**
+
+The model repository contains the released Run 4 LoRA adapter and its canonical model documentation.
+
+The adapter is intended to be used with the compatible base model:
+
+```text
+Mavkif/m2m100_rup_ur_to_rur
+```
+
+and tokenizer:
+
+```text
+Mavkif/m2m100_rup_tokenizer_both
+```
+
+The recommended production artifact is therefore:
+
+```text
+M2M100 Base
+      +
+Run 4 LoRA Adapter
+      +
+Compatible Tokenizer
+```
+
+The production model is consumed by the separate inference service.
+
+---
+
+# Production Inference
+
+For production deployment, use:
+
+**[`Maaz-x14/m2m100-roman-deploy`](https://github.com/Maaz-x14/m2m100-roman-deploy)**
+
+The production architecture is:
+
+```text
+Client
+  │
+  │ HTTP Request
+  ▼
+FastAPI Inference Service
+  │
+  ▼
+M2M100 Base Model
+  +
+Run 4 LoRA Adapter
+  │
+  ▼
+Roman Urdu
+  │
+  ▼
+HTTP Response
+```
+
+This fine-tuning repository is responsible for:
+
+```text
+Research
+Training
+Evaluation
+Reproducibility
+```
+
+The inference repository is responsible for:
+
+```text
+Serving
+API
+Deployment
+Production inference
+```
+
+For production users, the recommended path is:
+
+```text
+Hugging Face Run 4 Model
+           │
+           ▼
+Inference Repository
+           │
+           ▼
+FastAPI Service
+           │
+           ▼
+POST /transliterate
+```
 
 ---
 
 # Known Engineering Lessons
 
-## 1. Small corrective datasets can cause catastrophic forgetting
+## 1. Small corrective datasets can cause regression
 
-Run 3 demonstrated that continuing training on a small targeted dataset can damage previously learned capabilities.
+Run 3 demonstrated that continuing or adapting heavily toward a small targeted dataset can damage broader model behavior.
 
-A model that improves on the target failure case may simultaneously regress on the broader task.
-
-Therefore, corrective fine-tuning should always be evaluated against the complete benchmark.
+Targeted fine-tuning must therefore be evaluated against the full task distribution.
 
 ---
 
-## 2. Aggregate metrics are insufficient
+## 2. Dataset size is not enough
 
-A single BLEU score does not explain where a transliteration model succeeds or fails.
+A larger dataset is not automatically a better dataset.
 
-The project therefore uses category-level benchmark analysis.
+The data must represent the linguistic distribution of the intended application.
 
----
-
-## 3. Data distribution matters
-
-Increasing dataset size alone is not sufficient.
-
-The additional data must also cover the linguistic patterns that matter for the intended application.
-
-This project specifically targets modern Urdu usage and contemporary loanwords that were insufficiently represented in the available base training resources.
+For this project, that includes contemporary Urdu and Urdu-script English loanwords.
 
 ---
 
-## 4. Benchmark before and after every major change
+## 3. Aggregate metrics can hide regressions
 
-Every significant model change should be evaluated using the same benchmark whenever possible.
+A single BLEU score is insufficient to understand model behavior.
 
-This allows regressions to be detected rather than hidden by qualitative examples.
+Category-level evaluation is necessary to determine whether a change improves the intended failure modes without damaging other capabilities.
+
+---
+
+## 4. Training and evaluation must be separated
+
+The training dataset and held-out benchmark serve different purposes.
+
+```text
+Training Dataset
+    │
+    └── Used to optimize model parameters
+
+Held-Out Benchmark
+    │
+    └── Used to compare model versions
+```
+
+The benchmark should not be treated as another training resource.
+
+---
+
+## 5. Transformer library changes can affect generation
+
+The training pipeline includes explicit handling for generation behavior in the M2M100 implementation used by this project.
+
+The relevant fixes are documented directly in `train.py`.
+
+The implementation addresses issues involving:
+
+* Decoder input handling
+* `decoder_inputs_embeds`
+* Generation
+* `forced_bos_token_id`
+* Evaluation-time generation
+* GPU memory behavior
+* Checkpoint handling
+
+The source code comments in `train.py` contain the detailed engineering rationale for these fixes.
 
 ---
 
 # Limitations
 
-This project has several limitations.
+## Dataset limitations
 
-### Dataset limitations
+The dataset includes AI-assisted generation and conversion.
 
-The dataset contains AI-assisted data and does not have a precisely recorded source distribution.
+The exact numerical distribution of examples by collection source is not fully recorded.
 
-### Roman Urdu variability
+---
 
-There is no universally standardized Roman Urdu orthography.
+## Roman Urdu variability
 
-### Benchmark limitations
+Roman Urdu does not have one universally standardized spelling system.
 
-The benchmark is project-specific and should not be interpreted as a universal measure of Urdu transliteration quality.
+Multiple Roman Urdu spellings may be linguistically acceptable for the same Urdu input.
 
-### Evaluation limitations
+Therefore, exact string-match metrics may underestimate practical quality in some cases.
 
-BLEU provides a useful automated comparison but does not perfectly capture transliteration quality, phonetic correctness, or human preference.
+---
 
-### Model limitations
+## Benchmark limitations
+
+The benchmark is project-specific.
+
+It is useful for comparing model versions within this project but should not be interpreted as a universal Urdu transliteration benchmark.
+
+---
+
+## Model limitations
 
 The model may still produce:
 
@@ -838,35 +1049,27 @@ The model may still produce:
 * Errors on names and places
 * Errors on unseen vocabulary
 * Errors on unusual sentence structures
+* Inconsistent handling of code-switched text
 
 ---
 
-## Project Ecosystem
+## Evaluation limitations
 
-This project is part of a small set of repositories and Hugging Face resources:
+Automated metrics such as BLEU and chrF do not fully capture:
 
-| Resource | Purpose |
-|---|---|
-| [Fine-tuning Repository](...) | Training code, preprocessing, benchmarking, and experiment history |
-| [Hugging Face Dataset](...) | Canonical 4,860-example Urdu → Roman Urdu dataset |
-| [Hugging Face Model](...) | Current Run 4 production model |
-| [Inference Repository](...) | FastAPI production inference service |
+* Phonetic correctness
+* Orthographic preference
+* Human readability
+* Acceptable Roman Urdu spelling variation
+* Contextual appropriateness
 
-### Workflow
+Human evaluation remains valuable for future work.
 
-The project follows this pipeline:
-
-Dataset
-→ Data Preparation
-→ M2M100 LoRA Fine-Tuning
-→ Run 4 Model
-→ Production Inference API
-    
 ---
 
 # Citation
 
-If you use the code or methodology from this repository, please cite the project and associated model.
+If you use this repository, methodology, or training pipeline, please cite:
 
 ```bibtex
 @software{maaz_m2m100_urdu_roman_urdu_2026,
@@ -877,7 +1080,10 @@ If you use the code or methodology from this repository, please cite the project
 }
 ```
 
-For model and dataset citations, refer to their respective Hugging Face repositories.
+For the released model and dataset, please refer to their respective Hugging Face repositories:
+
+* [`Maaz-x14/m2m100-ur-to-roman-urdu`](https://huggingface.co/Maaz-x14/m2m100-ur-to-roman-urdu)
+* [`Maaz-x14/urdu-to-roman-urdu`](https://huggingface.co/datasets/Maaz-x14/urdu-to-roman-urdu)
 
 ---
 
@@ -885,7 +1091,7 @@ For model and dataset citations, refer to their respective Hugging Face reposito
 
 See the repository license file for the applicable terms.
 
-Third-party models, datasets, and source materials may have their own licenses and terms.
+The base model, tokenizer, datasets, and other third-party resources may have separate licenses and terms.
 
 Users are responsible for reviewing the applicable licenses before redistribution or commercial use.
 
@@ -899,15 +1105,37 @@ Developed by:
 
 **National University of Sciences and Technology (NUST)**
 
-Independent Open Source Project
+**Independent Open Source Project**
 
-The project builds upon the open-source M2M100 ecosystem and the work underlying the `Mavkif/m2m100_rup_ur_to_rur` model and associated Urdu–Roman Urdu resources.
+This project builds upon the open-source M2M100 ecosystem and the work underlying:
+
+```text
+Mavkif/m2m100_rup_ur_to_rur
+```
+
+and its associated Urdu–Roman Urdu resources.
 
 ---
 
-## Project Status
+# Project Status
 
-The Run 4 model represents the current production-oriented release of this fine-tuning effort.
+The **Run 4** model is the current production-oriented release of this fine-tuning effort.
+
+The project is organized around four canonical artifacts:
+
+```text
+1. Fine-Tuning Repository
+   Training + Evaluation + Reproducibility
+
+2. Hugging Face Dataset
+   Canonical 4,860-example Dataset
+
+3. Hugging Face Model
+   Run 4 LoRA Adapter
+
+4. Inference Repository
+   Production FastAPI Deployment
+```
 
 Future work may include:
 
@@ -915,6 +1143,8 @@ Future work may include:
 * More systematic human annotation
 * Improved Roman Urdu normalization
 * Larger and more rigorous benchmark sets
+* Human evaluation
 * Error-specific evaluation
+* Improved handling of names and places
 * Production inference optimization
 * Latency and throughput benchmarking
