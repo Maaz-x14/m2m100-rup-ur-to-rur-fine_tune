@@ -41,13 +41,9 @@ fine_tuned_model.zip
 processed_dataset/
 
 
-data/rur_to_ur_data.csv
+data/ur_to_rur_data.csv
 
 
-dataset_card.md
-DATASET_HISTORY.md
-dataset_run_summary.csv
-model_card.md
 nigg.md
 README_RUN_HISTORY_REPLACEMENT.md
 
