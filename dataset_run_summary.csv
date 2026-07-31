@@ -1,0 +1,6 @@
+run,raw_rows,train_rows,validation_rows,strategy,bleu_all
+Run 1,2012,1911.0,101.0,Fresh from base,54.52
+Run 2,2500,2375.0,125.0,Fresh from base,70.4
+Run 3,563,534.0,29.0,Continue from Run 2,47.97
+Run 3 Expanded,2360,,,Not trained standalone,
+Run 4,4860,4617.0,243.0,Fresh from base,72.14
